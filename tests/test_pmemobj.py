@@ -20,18 +20,18 @@ class Test(unittest.TestCase):
 
     def test_create_open_close_dont_raise(self):
         fn = self._test_fn()
-        pop = pmemobj.create(fn, pmemobj.MIN_POOL_SIZE)
+        pop = pmemobj.create(fn)
         pop.close()
         pop = pmemobj.open(fn)
         pop.close()
 
     def test_implicit_close_after_create(self):
         fn = self._test_fn()
-        pop = pmemobj.create(fn, pmemobj.MIN_POOL_SIZE)
+        pop = pmemobj.create(fn)
 
     def test_implicit_close_after_open(self):
         fn = self._test_fn()
-        pop = pmemobj.create(fn, pmemobj.MIN_POOL_SIZE)
+        pop = pmemobj.create(fn)
         pop.close()
         pop = pmemobj.open(fn)
 

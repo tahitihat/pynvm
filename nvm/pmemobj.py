@@ -81,7 +81,7 @@ def open(filename):
     check_ret(ret)
     return PersistentObjectPool(ret)
 
-def create(filename, pool_size, mode=0o666):
+def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     """The `create()` function creates an object pool with the given total
     `pool_size`.  Since the transactional nature of an object pool requires
     some space overhead, and immutable values are stored alongside the mutable
@@ -92,7 +92,8 @@ def create(filename, pool_size, mode=0o666):
     Raises RuntimeError if the file cannot be created or mapped.
 
     :param filename: specifies the name of the objectpool file to be created.
-    :param pool_size: the size of the object pool in bytes.
+    :param pool_size: the size of the object pool in bytes.  The default
+                      is pmemobj.MIN_POOL_SIZE.
     :param mode: specifies the permissions to use when creating the file.
     :return: a :class:`PersistentObjectPool` instance that manages the pool.
     """
