@@ -6,13 +6,15 @@ ffi.set_source("_pmem",
                    #include <libpmem.h>
                    #include <libpmemlog.h>
                    #include <libpmemblk.h>
+                   #include <libpmemobj.h>
                """,
-               libraries=['pmem', 'pmemlog', 'pmemblk'])
+               libraries=['pmem', 'pmemlog', 'pmemblk', 'pmemobj'])
 
 ffi.cdef("""
     /* libpmem */
     typedef int mode_t;
 
+    const char *pmem_errormsg(void);
     void *pmem_map_file(const char *path, size_t len, int flags, mode_t mode,
         size_t *mapped_lenp, int *is_pmemp);
     int pmem_unmap(void *addr, size_t len);
@@ -30,6 +32,7 @@ ffi.cdef("""
     typedef struct pmemlog PMEMlogpool;
     typedef int off_t;
 
+    const char *pmemlog_errormsg(void);
     PMEMlogpool *pmemlog_open(const char *path);
     PMEMlogpool *pmemlog_create(const char *path, size_t poolsize, mode_t mode);
     void pmemlog_close(PMEMlogpool *plp);
@@ -47,6 +50,7 @@ ffi.cdef("""
 
     /* libpmemblk */
     typedef struct pmemblk PMEMblkpool;
+    const char *pmemblk_errormsg(void);
     PMEMblkpool *pmemblk_open(const char *path, size_t bsize);
     PMEMblkpool *pmemblk_create(const char *path, size_t bsize,
         size_t poolsize, mode_t mode);
@@ -61,6 +65,19 @@ ffi.cdef("""
     const char *pmemblk_check_version(
         unsigned major_required,
         unsigned minor_required);
+
+    /* libpmemobj */
+    typedef struct pmemobjpool PMEMobjpool;
+    #define PMEMOBJ_MIN_POOL ...
+    #define PMEMOBJ_MAX_ALLOC_SIZE ...
+
+    const char *pmemobj_errormsg(void);
+    PMEMobjpool *pmemobj_open(const char *path, const char *layout);
+    PMEMobjpool *pmemobj_create(const char *path, const char *layout,
+        size_t poolsize, mode_t mode);
+    void pmemobj_close(PMEMobjpool *pop);
+    int pmemobj_check(const char *path, const char *layout);
+
 """)
 
 if __name__ == "__main__":
