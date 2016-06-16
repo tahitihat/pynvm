@@ -11,7 +11,7 @@ class Test(unittest.TestCase):
     # XXX I'm not sure how one gets a real pmem file, so keep this factored.
     def _test_fn(self):
         fn = "{}.pmem".format(uuid.uuid4())
-        self.addCleanup(lambda: os.remove if os.path.exists(fn) else None)
+        self.addCleanup(lambda: os.remove(fn) if os.path.exists(fn) else None)
         return fn
 
     def assertMsgBits(self, msg, *bits):

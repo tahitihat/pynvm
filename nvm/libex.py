@@ -1,13 +1,36 @@
 from cffi import FFI
 ffi = FFI()
 
+pmemobj_structs = """
+    /* for pmemobj.py */
+    typedef PMEMoid PObjPtr;
+    typedef struct {
+        PObjPtr type_table;
+        PObjPtr root_object;
+        } PRoot;
+    typedef struct {
+        size_t ob_refcnt;
+        size_t ob_type;
+        } PObject;
+    typedef struct {
+        PObjPtr ob_base;
+        size_t ob_size;
+        } PVarObject;
+    typedef struct {
+        PVarObject ob_base;
+        PObjPtr ob_items;
+        size_t allocated;
+        } PListObject;
+
+    """
+
 ffi.set_source("_pmem",
                """
                    #include <libpmem.h>
                    #include <libpmemlog.h>
                    #include <libpmemblk.h>
                    #include <libpmemobj.h>
-               """,
+               """ + pmemobj_structs,
                libraries=['pmem', 'pmemlog', 'pmemblk', 'pmemobj'])
 
 ffi.cdef("""
@@ -70,6 +93,19 @@ ffi.cdef("""
     typedef struct pmemobjpool PMEMobjpool;
     #define PMEMOBJ_MIN_POOL ...
     #define PMEMOBJ_MAX_ALLOC_SIZE ...
+    typedef struct pmemoid {
+        uint64_t pool_uuid_lo;
+        uint64_t off;
+    } PMEMoid;
+    static const PMEMoid OID_NULL;
+    enum pobj_tx_stage {
+        TX_STAGE_NONE,
+        TX_STAGE_WORK,
+        TX_STAGE_ONCOMMIT,
+        TX_STAGE_ONABORT,
+        TX_STAGE_FINALLY,
+        ...
+        };
 
     const char *pmemobj_errormsg(void);
     PMEMobjpool *pmemobj_open(const char *path, const char *layout);
@@ -77,8 +113,24 @@ ffi.cdef("""
         size_t poolsize, mode_t mode);
     void pmemobj_close(PMEMobjpool *pop);
     int pmemobj_check(const char *path, const char *layout);
+    PMEMoid pmemobj_root(PMEMobjpool *pop, size_t size);
+    size_t pmemobj_root_size(PMEMobjpool *pop);
+    void *pmemobj_direct(PMEMoid oid);
+    int pmemobj_tx_begin(PMEMobjpool *pop, void *env);
+    void pmemobj_tx_abort(int errnum);
+    void pmemobj_tx_commit(void);
+    int pmemobj_tx_end(void);
+    int pmemobj_tx_add_range(PMEMoid oid, uint64_t off, size_t size);
+    int pmemobj_tx_add_range_direct(const void *ptr, size_t size);
+    PMEMoid pmemobj_tx_alloc(size_t size, uint64_t type_num);
+    PMEMoid pmemobj_tx_zalloc(size_t size, uint64_t type_num);
+    PMEMoid pmemobj_tx_realloc(PMEMoid oid, size_t size, uint64_t type_num);
+    PMEMoid pmemobj_tx_zrealloc(PMEMoid oid, size_t size, uint64_t type_num);
+    PMEMoid pmemobj_tx_strdup(const char *s, uint64_t type_num);
+    int pmemobj_tx_free(PMEMoid oid);
+    enum pobj_tx_stage pmemobj_tx_stage(void);
 
-""")
+""" + pmemobj_structs)
 
 if __name__ == "__main__":
     ffi.compile()
