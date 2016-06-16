@@ -90,6 +90,7 @@ ffi.cdef("""
         unsigned minor_required);
 
     /* libpmemobj */
+    typedef ... va_list;
     typedef struct pmemobjpool PMEMobjpool;
     #define PMEMOBJ_MIN_POOL ...
     #define PMEMOBJ_MAX_ALLOC_SIZE ...
@@ -116,7 +117,7 @@ ffi.cdef("""
     PMEMoid pmemobj_root(PMEMobjpool *pop, size_t size);
     size_t pmemobj_root_size(PMEMobjpool *pop);
     void *pmemobj_direct(PMEMoid oid);
-    int pmemobj_tx_begin(PMEMobjpool *pop, void *env);
+    int pmemobj_tx_begin(PMEMobjpool *pop, void *env, va_list *);
     void pmemobj_tx_abort(int errnum);
     void pmemobj_tx_commit(void);
     int pmemobj_tx_end(void);

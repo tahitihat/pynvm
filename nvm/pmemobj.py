@@ -136,7 +136,7 @@ class PersistentObjectPool(object):
 
     def begin_transaction(self):
         """Start a new (sub)transaction."""
-        _check_errno(lib.pmemobj_tx_begin(self._pool_ptr, ffi.NULL))
+        _check_errno(lib.pmemobj_tx_begin(self._pool_ptr, ffi.NULL, ffi.NULL))
 
     def commit_transaction(self):
         """Commit the current (sub)transaction."""
@@ -197,7 +197,7 @@ class PersistentObjectPool(object):
     def _malloc_ptrs(self, count):
         """Return pointer to enough persistent memory for count pointers.
         """
-        return self._malloc(count * self._PTR_SIZE)
+        return self._malloc(count * ffi.sizeof('PObjPtr'))
 
     def _realloc(self, oid, size):
         """Copy oid contents into size bytes of new persistent memory.
@@ -208,7 +208,7 @@ class PersistentObjectPool(object):
 
     def _realloc_ptrs(self, oid, count):
         """As _realloc, but the new memory is enough for count pointers."""
-        return self._realloc(oid, count * self._PTR_SIZE)
+        return self._realloc(oid, count * ffi.sizeof('PObjPtr'))
 
     def _free(self, oid):
         """Free the memory pointed to by oid."""
