@@ -250,6 +250,61 @@ class PersistentObjectPool(object):
             if p_obj.ob_refcnt < 1:
                 self._free(oid)
 
+#
+# Pool access
+#
+
+def open(filename):
+    """This function opens an existing object pool, returning a
+    :class:`PersistentObjectPool`.
+
+    Raises RuntimeError if the file cannot be opened or mapped.
+
+    :param filename: Filename must be an existing file containing an object
+                     pool as created by :func:`nvm.pmemlog.create`.
+                     The application must have permission to open the file
+                     and memory map it with read/write permissions.
+    :return: a :class:`PersistentObjectPool` instance that manages the pool.
+    """
+    ret = _check_null(lib.pmemobj_open(_coerce_fn(filename), layout_version))
+    return PersistentObjectPool(ret, filename)
+
+def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
+    """The `create()` function creates an object pool with the given total
+    `pool_size`.  Since the transactional nature of an object pool requires
+    some space overhead, and immutable values are stored alongside the mutable
+    containers that point to them, the space requirement of a given set of
+    objects is ocnsiderably larger than a naive calculation based on
+    sys.getsize would suggest.
+
+    Raises RuntimeError if the file cannot be created or mapped.
+
+    :param filename: specifies the name of the objectpool file to be created.
+    :param pool_size: the size of the object pool in bytes.  The default
+                      is pmemobj.MIN_POOL_SIZE.
+    :param mode: specifies the permissions to use when creating the file.
+    :return: a :class:`PersistentObjectPool` instance that manages the pool.
+    """
+    # Assume create does an atomic create of the file before it does anything
+    # else persistent, so therefore we don't need a thread lock around this
+    # function body.
+    ret = _check_null(lib.pmemobj_create(_coerce_fn(filename), layout_version,
+                                        pool_size, mode))
+    pop = PersistentObjectPool(ret, filename, create=True)
+    pmem_root = lib.pmemobj_root(pop._pool_ptr, ffi.sizeof('PRoot'))
+    pmem_root = ffi.cast('PRoot *', pop._direct(pmem_root))
+    with pop:
+        type_table = PersistentList(__manager__=pop)
+        lib.pmemobj_tx_add_range_direct(pmem_root, ffi.sizeof('PRoot'))
+        pmem_root.type_table = type_table._oid
+    pop._type_table = type_table
+    return pop
+
+
+#
+# Persistent Classes
+#
+
 
 class PersistentList(abc.MutableSequence):
     """Persistent version of the 'list' type."""
@@ -351,53 +406,3 @@ class PersistentList(abc.MutableSequence):
 
     def __len__():
         return self._size
-
-#
-# Pool access
-#
-
-def open(filename):
-    """This function opens an existing object pool, returning a
-    :class:`PersistentObjectPool`.
-
-    Raises RuntimeError if the file cannot be opened or mapped.
-
-    :param filename: Filename must be an existing file containing an object
-                     pool as created by :func:`nvm.pmemlog.create`.
-                     The application must have permission to open the file
-                     and memory map it with read/write permissions.
-    :return: a :class:`PersistentObjectPool` instance that manages the pool.
-    """
-    ret = _check_null(lib.pmemobj_open(_coerce_fn(filename), layout_version))
-    return PersistentObjectPool(ret, filename)
-
-def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
-    """The `create()` function creates an object pool with the given total
-    `pool_size`.  Since the transactional nature of an object pool requires
-    some space overhead, and immutable values are stored alongside the mutable
-    containers that point to them, the space requirement of a given set of
-    objects is ocnsiderably larger than a naive calculation based on
-    sys.getsize would suggest.
-
-    Raises RuntimeError if the file cannot be created or mapped.
-
-    :param filename: specifies the name of the objectpool file to be created.
-    :param pool_size: the size of the object pool in bytes.  The default
-                      is pmemobj.MIN_POOL_SIZE.
-    :param mode: specifies the permissions to use when creating the file.
-    :return: a :class:`PersistentObjectPool` instance that manages the pool.
-    """
-    # Assume create does an atomic create of the file before it does anything
-    # else persistent, so therefore we don't need a thread lock around this
-    # function body.
-    ret = _check_null(lib.pmemobj_create(_coerce_fn(filename), layout_version,
-                                        pool_size, mode))
-    pop = PersistentObjectPool(ret, filename, create=True)
-    pmem_root = lib.pmemobj_root(pop._pool_ptr, ffi.sizeof('PRoot'))
-    pmem_root = ffi.cast('PRoot *', pop._direct(pmem_root))
-    with pop:
-        type_table = PersistentList(__manager__=pop)
-        lib.pmemobj_tx_add_range_direct(pmem_root, ffi.sizeof('PRoot'))
-        pmem_root.type_table = type_table._oid
-    pop._type_table = type_table
-    return pop
