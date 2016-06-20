@@ -312,7 +312,7 @@ class PersistentObjectPool(object):
 
     def _persist(self, obj):
         """Store obj in persistent memory and return its oid."""
-        key = obj if hasattr(obj.__hash__) else id(obj)
+        key = obj if hasattr(obj, '__hash__') else id(obj)
         try:
             return self._persist_cache[key]
         except KeyError:
