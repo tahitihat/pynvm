@@ -110,6 +110,7 @@ class TestPersistentList(TestCase):
         expected = "PersistentList(['a', 'b', 'c'])"
         lst = self._make_list(['a', 'b', 'c'])
         self.assertEqual(repr(lst), expected)
+        self.assertEqual(repr(self._reread_list()), expected)
 
     def test_getitem(self):
         lst = self._make_list(['a', 'b', 'c'])

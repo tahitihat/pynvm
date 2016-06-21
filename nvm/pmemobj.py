@@ -437,21 +437,23 @@ class PersistentObjectPool(object):
                   oid, resurrector, res)
         return res
 
-    def _persist_builtins_str(self, obj):
-        # XXX punt on figuring out how to deal with python2 bytes for now.
-        chars = obj.encode('utf-8')
+    def _persist_builtins_str(self, s):
+        type_code = self._get_type_code(s.__class__)
+        if sys.version_info[0] > 2:
+            s = s.encode('utf-8')
         with self:
-            p_str_oid = self._malloc(ffi.sizeof('PObject') + len(chars) + 1)
+            p_str_oid = self._malloc(ffi.sizeof('PObject') + len(s) + 1)
             p_str = ffi.cast('PObject *', self._direct(p_str_oid))
-            p_str.ob_type = self._get_type_code(obj.__class__)
+            p_str.ob_type = type_code
             body = ffi.cast('char *', p_str) + ffi.sizeof('PObject')
-            ffi.buffer(body, len(chars))[:] = chars
+            ffi.buffer(body, len(s))[:] = s
         return p_str_oid
 
     def _resurrect_builtins_str(self, ob_body):
-        # XXX punt on figuring out how to deal with python2 bytes for now.
-        # XXX this string call is almost certainly wrong on python3.
-        return ffi.string(ob_body).decode('utf-8')
+        s = ffi.string(ob_body)
+        if sys.version_info[0] > 2:
+            s = s.decode('utf-8')
+        return s
 
     def _incref(self, oid):
         log.debug('incref %r', oid)
