@@ -301,6 +301,8 @@ class PersistentObjectPool(object):
         # For now, just use the underlying allocator...later we'll write a
         # small object allocator on top, and the pointer size will grow.
         log.debug('malloc: %r', size)
+        if size == 0:
+            return oid_wrapper(OID_NULL)
         return _check_oid(lib.pmemobj_tx_zalloc(size, 0))
 
     def _malloc_ptrs(self, count):
@@ -315,6 +317,9 @@ class PersistentObjectPool(object):
         Return pointer to the new memory.
         """
         log.debug('realloc: %r %r', oid, size)
+        if size == 0:
+            self._free(oid)
+            return oid_wrapper(OID_NULL)
         return _check_oid(lib.pmemobj_tx_zrealloc(oid.oid, size, 0))
 
     def _realloc_ptrs(self, oid, count):
@@ -460,8 +465,8 @@ class PersistentObjectPool(object):
         p_obj = ffi.cast('PObject *', self._direct(oid))
         with self:
             self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
-            p_obj.ob_refcnt -= 1
             assert p_obj.ob_refcnt > 0
+            p_obj.ob_refcnt -= 1
             if p_obj.ob_refcnt < 1:
                 self._free(oid)
 
@@ -589,7 +594,8 @@ class PersistentList(abc.MutableSequence):
             if items is None:
                 items = mm._malloc_ptrs(new_allocated)
             else:
-                items = mm._realloc_ptrs(items, new_allocated)
+                items = mm._realloc_ptrs(oid_wrapper(self._body.ob_items),
+                                         new_allocated)
             mm._tx_add_range_direct(self._body, ffi.sizeof('PListObject'))
             self._body.ob_items = items.oid
             self._body.allocated = new_allocated
@@ -611,21 +617,37 @@ class PersistentList(abc.MutableSequence):
             mm._tx_add_range_direct(items + index,
                                     ffi.offsetof('PObjPtr *', newsize))
             for i in range(size, index, -1):
-                items[i+1] = items[i]
+                items[i] = items[i-1]
             v_oid = mm._persist(value)
             mm._incref(v_oid)
             items[index] = v_oid.oid
 
+    def _normalize_index(self, index):
+        try:
+            index = int(index)
+        except TypeError:
+            # Assume it is a slice
+            # XXX fixme
+            raise NotImplementedError("Slicing not yet implemented")
+        if index < 0:
+            index += self._size
+        if index < 0 or index >= self._size:
+            raise IndexError
+        return index
+
     def __setitem__(self, index, value):
+        index = self._normalize_index(index)
         mm = self.__manager__
+        items = self._items
         with mm:
             v_oid = mm._persist(value)
             mm._tx_add_range_direct(ffi.addressof(items, index),
                                     ffi.sizeof('PObjPtr *'))
-            self._items[index] = v_oid.oid
+            items[index] = v_oid.oid
             mm._incref(v_oid)
 
     def __delitem__(self, index):
+        index = self._normalize_index(index)
         mm = self.__manager__
         size = self._size
         newsize = size - 1
@@ -633,27 +655,15 @@ class PersistentList(abc.MutableSequence):
         with mm:
             mm._tx_add_range_direct(ffi.addressof(items, index),
                                     ffi.offsetof('PObjPtr *', size))
-            mm._decref(items[index])
+            mm._decref(oid_wrapper(items[index]))
             for i in range(index, newsize):
                 items[i] = items[i+1]
             self._resize(newsize)
 
     def __getitem__(self, index):
+        index = self._normalize_index(index)
         items = self._items
-        if items is None:
-            items = []
-        try:
-            index = int(index)
-        except TypeError:
-            # Assume it is a slice
-            # XXX fixme
-            raise NotImplementedError("Slicing not yet implemented")
-        else:
-            if index < 0:
-                index += self._size
-            if index >= self._size:
-                raise IndexError
-            return self.__manager__._resurrect(oid_wrapper(items[index]))
+        return self.__manager__._resurrect(oid_wrapper(items[index]))
 
     def __len__(self):
         return self._size
