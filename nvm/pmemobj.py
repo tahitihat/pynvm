@@ -15,11 +15,14 @@ except ImportError:
 import errno
 if not hasattr(errno, 'ECANCELED'):
     errno.ECANCELED = 125  # 2.7 errno doesn't define this, so guess.
+import logging
 import os
 import sys
 from pickle import whichmodule
 from threading import RLock
 from _pmem import lib, ffi
+
+log = logging.getLogger('pynvm.pmemobj')
 
 # If we ever need to change how we make use of the persistent store, having a
 # version as the layout will allow us to provide backward compatibility.
@@ -32,8 +35,26 @@ OID_NULL = lib.OID_NULL
 
 def _is_OID_NULL(oid):
     # XXX I think == should work here, but it doesn't.
-    return (oid.pool_uuid_lo == OID_NULL.pool_uuid_lo
-            and oid.off == OID_NULL.off)
+    return (oid.oid.pool_uuid_lo == OID_NULL.pool_uuid_lo
+            and oid.oid.off == OID_NULL.off)
+
+class oid_wrapper(object):
+    """Helper class to deal with cffi structs not supporting ==.
+
+    Whlie we're at it, a useful repr.  We wrap all oids in this
+    wrapper at the earliest opportunity, and unwrap it just before
+    handing it off to cffi.
+    """
+    # XXX This is not clean, it would be much better to enhance cffi.
+    def __init__(self, oid):
+        self.oid = oid
+    def __eq__(self, other):
+        return (self.oid.pool_uuid_lo == other.oid.pool_uuid_lo
+                and self.oid.off == other.oid.off)
+    def __hash__(self):
+        return hash(self.oid.pool_uuid_lo) + hash(self.oid.off)
+    def __repr__(self):
+        return "oid({}, {})".format(self.oid.pool_uuid_lo, self.oid.off)
 
 # XXX move this to a central location and use in all libraries.
 def _coerce_fn(file_name):
@@ -78,6 +99,7 @@ def _check_errno(errno):
 def _check_oid(oid):
     """Raise an error if oid is OID_NULL, otherwise return it.
     """
+    oid = oid_wrapper(oid)
     if _is_OID_NULL(oid):
         _raise_per_errno()
     return oid
@@ -88,6 +110,7 @@ def _class_string(cls):
 
     Raise TypeError if we can't compute a useful string.
     """
+    log.debug("_class_string: %r", cls)
     try:
         return _class_string_cache[cls]
     except KeyError:
@@ -122,11 +145,13 @@ def _class_string(cls):
     if module_name == '__builtin__':
         module_name = 'builtins'
     res = _class_string_cache[cls] = "{}:{}".format(module_name, name)
+    log.debug("new _class_string: %r", res)
     return res
 
 _class_from_string_cache = {}
 def _find_class_from_string(cls_string):
     """Return class object corresponding to class_string."""
+    log.debug('_find_class_from_string: %r', cls_string)
     try:
         return _class_from_string_cache[cls_string]
     except KeyError:
@@ -137,6 +162,7 @@ def _find_class_from_string(cls_string):
     __import__(module_name, level=0)
     res = getattr(sys.modules[module_name], name)
     _class_from_string_cache[cls_string] =  res
+    log.debug('new class_from_string: %r', res)
     return res
 
 
@@ -153,12 +179,14 @@ class PersistentObjectPool(object):
 
     # XXX create should be a keyword-only arg but we don't have those in 2.7.
     def __init__(self, pool_ptr, filename, create=False):
+        log.debug('PersistentObjectPool.__init__: %r, %r, create=%s',
+                  pool_ptr, filename, create)
         self._pool_ptr = pool_ptr
         self.filename = filename
         self.closed = False
         if create:
             self._type_table = None
-            self.root = None
+            self._root = None
             self._init_caches()
             return
         # I don't think we can wrap a transaction around pool creation,
@@ -171,21 +199,22 @@ class PersistentObjectPool(object):
             self._init_caches()
             size = lib.pmemobj_root_size(self._pool_ptr)
             if size:
-                pmem_root = self._direct(lib.pmemobj_root(self._pool_ptr, 0))
+                pmem_root = self._direct(oid_wrapper(lib.pmemobj_root(self._pool_ptr, 0)))
                 pmem_root = ffi.cast('PRoot *', pmem_root)
             # XXX I'm not sure the check for pmem_root not NULL is needed.
             if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
                 raise RuntimeError("Pool {} not initialized completely".format(
                     self.filename))
-            self._type_table = self._resurrect(pmem_root.type_table)
-            # XXX need to make root a property for assignment reasons
-            self.root = self._resurrect(pmem_root.root_object)
+            self._type_table = self._resurrect(oid_wrapper(pmem_root.type_table))
+            self._root = self._resurrect(oid_wrapper(pmem_root.root_object))
+            self._pmem_root = pmem_root
 
     def close(self):
         """This method closes the object pool.  The object pool itself lives on
         in the file that contains it and may be reopened at a later date, and
         all the objects in it accessed, using :func:`~nvm.pmemlog.open`.
         """
+        log.debug('close')
         lib.pmemobj_close(self._pool_ptr)
         self.closed = True
 
@@ -193,16 +222,28 @@ class PersistentObjectPool(object):
         if not self.closed:
             self.close()
 
+    @property
+    def root(self):
+        return self._root
+    @root.setter
+    def root(self, value):
+        log.debug("setting 'root' to %r", value)
+        oid = self._persist(value)
+        self._pmem_root.root_object = oid.oid
+        self._root = value
+
     #
     # Transaction management
     #
 
     def begin_transaction(self):
         """Start a new (sub)transaction."""
+        #log.debug('start_transaction')
         _check_errno(lib.pmemobj_tx_begin(self._pool_ptr, ffi.NULL, ffi.NULL))
 
     def commit_transaction(self):
         """Commit the current (sub)transaction."""
+        #log.debug('commit_transaction')
         lib.pmemobj_tx_commit()
         _check_errno(lib.pmemobj_tx_end())
 
@@ -211,18 +252,22 @@ class PersistentObjectPool(object):
 
         Raise an error if the returned errno is not 0 or ECNANCELED.
         """
+        #log.debug('_end_transaction')
         if lib.pmemobj_tx_end() not in (0, errno.ECANCELED):
             _raise_per_errno()
 
     def abort_transaction(self, errno=errno.ECANCELED):
         """Abort the current (sub)transaction."""
+        #log.debug('abort_transaction')
         lib.pmemobj_tx_abort(errno)
         self._end_transaction()
 
     def __enter__(self):
+        #log.debug('__enter__')
         self.begin_transaction()
 
     def __exit__(self, *args):
+        #log.debug('__exit__')
         stage = lib.pmemobj_tx_stage()
         if stage == lib.TX_STAGE_WORK:
             if args[0] is None:
@@ -255,11 +300,13 @@ class PersistentObjectPool(object):
         """
         # For now, just use the underlying allocator...later we'll write a
         # small object allocator on top, and the pointer size will grow.
+        log.debug('malloc: %r', size)
         return _check_oid(lib.pmemobj_tx_zalloc(size, 0))
 
     def _malloc_ptrs(self, count):
         """Return pointer to enough persistent memory for count pointers.
         """
+        log.debug('malloc_ptrs: %r', count)
         return self._malloc(count * ffi.sizeof('PObjPtr'))
 
     def _realloc(self, oid, size):
@@ -267,19 +314,22 @@ class PersistentObjectPool(object):
 
         Return pointer to the new memory.
         """
-        return _check_oid(lib.pmemobj_tx_zrealloc(oid, size, 0))
+        log.debug('realloc: %r %r', oid, size)
+        return _check_oid(lib.pmemobj_tx_zrealloc(oid.oid, size, 0))
 
     def _realloc_ptrs(self, oid, count):
+        log.debug('realloc_ptrs: %r %r', oid, count)
         """As _realloc, but the new memory is enough for count pointers."""
         return self._realloc(oid, count * ffi.sizeof('PObjPtr'))
 
     def _free(self, oid):
         """Free the memory pointed to by oid."""
-        _check_errno(lib.pmemobj_tx_free(oid))
+        log.debug('free: %r', oid)
+        _check_errno(lib.pmemobj_tx_free(oid.oid))
 
     def _direct(self, oid):
         """Return the real memory address where oid lives."""
-        return _check_null(lib.pmemobj_direct(oid))
+        return _check_null(lib.pmemobj_direct(oid.oid))
 
     def _tx_add_range_direct(self, ptr, size):
         lib.pmemobj_tx_add_range_direct(ptr, size)
@@ -292,27 +342,34 @@ class PersistentObjectPool(object):
         # We have a couple of special cases to avoid infinite regress.
         self._type_code_cache = {PersistentList: 0, str: 1}
         self._persist_cache = {}
-        self._resurrect_cache = {OID_NULL: None}   # XXX WeakValueDictionary?
+        # XXX WeakValueDictionary?
+        self._resurrect_cache = {oid_wrapper(OID_NULL): None}
 
     def _get_type_code(self, cls):
         """Return the index into the type table for cls.
 
         Create the type table entry if required.
         """
+        log.debug('get_type_code: %r', cls)
         try:
             return self._type_code_cache[cls]
         except KeyError:
             pass
         cls_str = _class_string(cls)
         try:
-            return self._type_table.index(cls_str)
+            code = self._type_table.index(cls_str)
+            log.debug('type_code: %r', code)
+            return code
         except ValueError:
             self._type_table.append(cls_str)
-            return len(self._type_table) - 1
+            code = len(self._type_table) - 1
+            log.debug('new type_code: %r', code)
+            return code
 
     def _persist(self, obj):
         """Store obj in persistent memory and return its oid."""
-        key = obj if hasattr(obj, '__hash__') else id(obj)
+        key = obj if getattr(obj, '__hash__', None) else id(obj)
+        log.debug('persist: %r (key %r)', obj, key)
         try:
             return self._persist_cache[key]
         except KeyError:
@@ -323,16 +380,23 @@ class PersistentObjectPool(object):
         persister = '_persist_' + cls_str.replace(':', '_')
         if not hasattr(self, persister):
             raise TypeError("Don't know now to persist {!r}".format(cls_str))
-        res = self._persist_cache[key] = getattr(self, persister)(obj)
-        return res
+        oid = getattr(self, persister)(obj)
+        self._persist_cache[key] = oid
+        self._resurrect_cache[oid] = obj
+        log.debug('new oid: %r', oid)
+        return oid
 
     def _resurrect(self, oid):
         """Return python object representing the data stored at oid."""
+        # XXX need multiple debug levels
+        #log.debug('resurrect: %r', oid)
         try:
             # XXX The fact that oid == OID_NULL doesn't work probably
             # implies that this cache isn't going to work either, so
             # we'll need to debug that soon.
-            return self._resurrect_cache[oid]
+            obj = self._resurrect_cache[oid]
+            #log.debug('resurrect from cache: %r', self._resurrect_cache[oid])
+            return obj
         except KeyError:
             pass
         if _is_OID_NULL(oid):
@@ -346,6 +410,7 @@ class PersistentObjectPool(object):
         if type_code == 0:
             res = PersistentList(__manager__=self, _oid=oid)
             self._resurrect_cache[oid] = res
+            log.debug('resurrect PersistentList: %r', res)
             return res
         if type_code == 1:
             cls_str = 'builtins:str'
@@ -355,9 +420,16 @@ class PersistentObjectPool(object):
         if not hasattr(self, resurrector):
             # It must be a persistent type.
             cls = find_class_from_string(cls_str)
-            return cls(__manager__=self, _oid=oid)
-        body = ffi.cast('char *', object_head) + ffi.sizeof('PObject')
-        res = self._resurrect_cache[oid] = resurrector(body)
+            res = cls(__manager__=self, _oid=oid)
+            log.debug('resurrect %r: persistent type (%r): %r',
+                      oid, cls_str, res)
+            return res
+        body = ffi.cast('char *', obj_head) + ffi.sizeof('PObject')
+        res = getattr(self, resurrector)(body)
+        self._resurrect_cache[oid] = res
+        self._persist_cache[res] = oid
+        log.debug('resurrect %r: immutable type (%r): %r',
+                  oid, resurrector, res)
         return res
 
     def _persist_builtins_str(self, obj):
@@ -368,7 +440,7 @@ class PersistentObjectPool(object):
             p_str = ffi.cast('PObject *', self._direct(p_str_oid))
             p_str.ob_type = self._get_type_code(obj.__class__)
             body = ffi.cast('char *', p_str) + ffi.sizeof('PObject')
-            body = chars
+            ffi.buffer(body, len(chars))[:] = chars
         return p_str_oid
 
     def _resurrect_builtins_str(self, ob_body):
@@ -377,12 +449,14 @@ class PersistentObjectPool(object):
         return ffi.string(ob_body).decode('utf-8')
 
     def _incref(self, oid):
+        log.debug('incref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
         with self:
             self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
             p_obj.ob_refcnt += 1
 
     def _decref(self, oid):
+        log.debug('decref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
         with self:
             self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
@@ -390,6 +464,10 @@ class PersistentObjectPool(object):
             assert p_obj.ob_refcnt > 0
             if p_obj.ob_refcnt < 1:
                 self._free(oid)
+
+    def new(self, typ, *args, **kw):
+        log.debug('new: %s, %s, %s', typ, args, kw)
+        return typ(*args, __manager__=self, **kw)
 
 #
 # Pool access
@@ -407,6 +485,7 @@ def open(filename):
                      and memory map it with read/write permissions.
     :return: a :class:`PersistentObjectPool` instance that manages the pool.
     """
+    log.debug('open: %s', filename)
     ret = _check_null(lib.pmemobj_open(_coerce_fn(filename), layout_version))
     return PersistentObjectPool(ret, filename)
 
@@ -429,16 +508,19 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     # Assume create does an atomic create of the file before it does anything
     # else persistent, so therefore we don't need a thread lock around this
     # function body.
+    log.debug('create: %s, %s, %s', filename, pool_size, mode)
     ret = _check_null(lib.pmemobj_create(_coerce_fn(filename), layout_version,
                                         pool_size, mode))
     pop = PersistentObjectPool(ret, filename, create=True)
     pmem_root = lib.pmemobj_root(pop._pool_ptr, ffi.sizeof('PRoot'))
-    pmem_root = ffi.cast('PRoot *', pop._direct(pmem_root))
+    pmem_root = ffi.cast('PRoot *', pop._direct(oid_wrapper(pmem_root)))
     with pop:
         # Dummy first two elements; they are handled as special cases.
         type_table = PersistentList(['', ''], __manager__=pop)
         lib.pmemobj_tx_add_range_direct(pmem_root, ffi.sizeof('PRoot'))
-        pmem_root.type_table = type_table._oid
+        pmem_root.type_table = type_table._oid.oid
+        temp = pmem_root.type_table
+        pop._pmem_root = pmem_root
     pop._type_table = type_table
     return pop
 
@@ -482,11 +564,11 @@ class PersistentList(abc.MutableSequence):
 
     @property
     def _items(self):
-        ob_items = self._body.ob_items
+        ob_items = oid_wrapper(self._body.ob_items)
         if _is_OID_NULL(ob_items):
             return None
         return ffi.cast('PObjPtr *',
-                        self.__manager__._direct(self._body.ob_items))
+                        self.__manager__._direct(ob_items))
 
     def _resize(self, newsize):
         mm = self.__manager__
@@ -509,7 +591,7 @@ class PersistentList(abc.MutableSequence):
             else:
                 items = mm._realloc_ptrs(items, new_allocated)
             mm._tx_add_range_direct(self._body, ffi.sizeof('PListObject'))
-            self._body.ob_items = items
+            self._body.ob_items = items.oid
             self._body.allocated = new_allocated
             ffi.cast('PVarObject *', self._body).ob_size = newsize
 
@@ -518,8 +600,7 @@ class PersistentList(abc.MutableSequence):
         with mm:
             size = self._size
             newsize = size + 1
-            if newsize > self._allocated:
-                self._resize(newsize)
+            self._resize(newsize)
             if index < 0:
                 index += size
                 if index < 0:
@@ -533,7 +614,7 @@ class PersistentList(abc.MutableSequence):
                 items[i+1] = items[i]
             v_oid = mm._persist(value)
             mm._incref(v_oid)
-            items[index] = v_oid
+            items[index] = v_oid.oid
 
     def __setitem__(self, index, value):
         mm = self.__manager__
@@ -541,7 +622,7 @@ class PersistentList(abc.MutableSequence):
             v_oid = mm._persist(value)
             mm._tx_add_range_direct(ffi.addressof(items, index),
                                     ffi.sizeof('PObjPtr *'))
-            self._items[index] = v_oid
+            self._items[index] = v_oid.oid
             mm._incref(v_oid)
 
     def __delitem__(self, index):
@@ -570,7 +651,29 @@ class PersistentList(abc.MutableSequence):
         else:
             if index < 0:
                 index += self._size
-            return self.__manager__._resurrect(items[index])
+            if index >= self._size:
+                raise IndexError
+            return self.__manager__._resurrect(oid_wrapper(items[index]))
 
     def __len__(self):
         return self._size
+
+    def __repr__(self):
+        return "{}([{}])".format(self.__class__.__name__,
+                                 ', '.join("{!r}".format(x) for x in self))
+
+    def __eq__(self, other):
+        try:
+            ol = len(other)
+        except AttributeError:
+            return NotImplemented
+        if len(self) != ol:
+            return False
+        for i in range(len(self)):
+            try:
+                ov = other[i]
+            except (AttributeError, IndexError):
+                return NotImplemented
+            if self[i] != ov:
+                return False
+        return True
