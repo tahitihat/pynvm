@@ -6,6 +6,9 @@
 =========================================================
 
 """
+
+# XXX Time to break this up into a package.
+
 try:
     import collections.abc as abc
 except ImportError:
@@ -228,6 +231,7 @@ class PersistentObjectPool(object):
     @root.setter
     def root(self, value):
         log.debug("setting 'root' to %r", value)
+        # XXX need a with here, a lock, an incref, and a conditional decref.
         oid = self._persist(value)
         self._pmem_root.root_object = oid.oid
         self._root = value
@@ -294,6 +298,9 @@ class PersistentObjectPool(object):
     # active, and the global state means that only one object pool may have a
     # transaction executing in a given thread at a time.  XXX should add a
     # check for this, probably in __enter__.
+
+    # XXX should use a non-zero type code, so we can use it to walk the list of
+    # all allocated objects in the cyclic GC that doesn't exist yet.
 
     def _malloc(self, size):
         """Return a pointer to size bytes of newly allocated persistent memory.
@@ -470,6 +477,8 @@ class PersistentObjectPool(object):
             assert p_obj.ob_refcnt > 0
             p_obj.ob_refcnt -= 1
             if p_obj.ob_refcnt < 1:
+                # XXX this needs to check for a del 'slot' and call it
+                # if it exists (equivalent to CPython's tp_del).
                 self._free(oid)
 
     def new(self, typ, *args, **kw):
@@ -539,6 +548,9 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
 
 class PersistentList(abc.MutableSequence):
     """Persistent version of the 'list' type."""
+
+    # XXX locking!
+    # XXX tp_del method (see _decref)
 
     def __init__(self, *args, **kw):
         if '__manager__' not in kw:
