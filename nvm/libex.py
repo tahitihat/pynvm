@@ -21,6 +21,10 @@ pmemobj_structs = """
         PObjPtr ob_items;
         size_t allocated;
         } PListObject;
+    typedef struct {
+        PObject ob_base;
+        double fval;
+        } PFloatObject;
 
     """
 

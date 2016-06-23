@@ -1,8 +1,10 @@
+# -*- coding: utf8 -*-
 import os
 import sys
 import unittest
 import uuid
 
+from tests.parameterize import parameterize
 from nvm import pmemobj
 
 
@@ -68,6 +70,22 @@ class Test(TestCase):
         pop.close()
         pop = pmemobj.open(fn)
         self.assertEqual(pop.root, test_list)
+
+
+@parameterize
+class TestSimpleImmutablePersistence(TestCase):
+
+    objs_params = dict(float=[10.5], string=['abcde'], ustring=['abő'])
+
+    def objs_as_persisting(self, obj):
+        fn = self._test_fn()
+        pop = pmemobj.create(fn)
+        pop.root = obj
+        self.assertEqual(pop.root, obj)
+        pop.close()
+        pop = pmemobj.open(fn)
+        self.assertEqual(pop.root, obj)
+        pop.close()
 
 
 class TestPersistentList(TestCase):

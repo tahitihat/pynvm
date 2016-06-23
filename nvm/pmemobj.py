@@ -416,8 +416,8 @@ class PersistentObjectPool(object):
             # to None here, but try it and see.
             self._resurrect_cache[oid] = None
             return None
-        obj_head = ffi.cast('PObject *', self._direct(oid))
-        type_code = obj_head.ob_type
+        obj_ptr = ffi.cast('PObject *', self._direct(oid))
+        type_code = obj_ptr.ob_type
         # The special cases are to avoid infinite regress in the type table.
         if type_code == 0:
             res = PersistentList(__manager__=self, _oid=oid)
@@ -436,8 +436,7 @@ class PersistentObjectPool(object):
             log.debug('resurrect %r: persistent type (%r): %r',
                       oid, cls_str, res)
             return res
-        body = ffi.cast('char *', obj_head) + ffi.sizeof('PObject')
-        res = getattr(self, resurrector)(body)
+        res = getattr(self, resurrector)(obj_ptr)
         self._resurrect_cache[oid] = res
         self._persist_cache[res] = oid
         log.debug('resurrect %r: immutable type (%r): %r',
@@ -456,11 +455,25 @@ class PersistentObjectPool(object):
             ffi.buffer(body, len(s))[:] = s
         return p_str_oid
 
-    def _resurrect_builtins_str(self, ob_body):
-        s = ffi.string(ob_body)
+    def _resurrect_builtins_str(self, obj_ptr):
+        body = ffi.cast('char *', obj_ptr) + ffi.sizeof('PObject')
+        s = ffi.string(body)
         if sys.version_info[0] > 2:
             s = s.decode('utf-8')
         return s
+
+    def _persist_builtins_float(self, f):
+        type_code = self._get_type_code(f.__class__)
+        with self:
+            p_float_oid = self._malloc(ffi.sizeof('PFloatObject'))
+            p_float = ffi.cast('PObject *', self._direct(p_float_oid))
+            p_float.ob_type = type_code
+            p_float = ffi.cast('PFloatObject *', p_float)
+            p_float.fval = f
+        return p_float_oid
+
+    def _resurrect_builtins_float(self, obj_ptr):
+        return ffi.cast('PFloatObject *', obj_ptr).fval
 
     def _incref(self, oid):
         log.debug('incref %r', oid)
