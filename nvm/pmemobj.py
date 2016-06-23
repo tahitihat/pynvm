@@ -227,14 +227,17 @@ class PersistentObjectPool(object):
 
     @property
     def root(self):
-        return self._root
+        return self._resurrect(oid_wrapper(self._pmem_root.root_object))
     @root.setter
     def root(self, value):
         log.debug("setting 'root' to %r", value)
-        # XXX need a with here, a lock, an incref, and a conditional decref.
-        oid = self._persist(value)
-        self._pmem_root.root_object = oid.oid
-        self._root = value
+        # XXX need a lock, an incref, and a conditional decref.
+        with self:
+            oid = self._persist(value)
+            self._tx_add_range_direct(
+                ffi.addressof(self._pmem_root.root_object),
+                ffi.sizeof('PObjPtr'))
+            self._pmem_root.root_object = oid.oid
 
     #
     # Transaction management
@@ -260,9 +263,9 @@ class PersistentObjectPool(object):
         if lib.pmemobj_tx_end() not in (0, errno.ECANCELED):
             _raise_per_errno()
 
-    def abort_transaction(self, errno=errno.ECANCELED):
+    def abort_transaction(self, errno=0):
         """Abort the current (sub)transaction."""
-        #log.debug('abort_transaction')
+        log.debug('abort_transaction')
         lib.pmemobj_tx_abort(errno)
         self._end_transaction()
 
@@ -271,23 +274,22 @@ class PersistentObjectPool(object):
         self.begin_transaction()
 
     def __exit__(self, *args):
-        #log.debug('__exit__')
         stage = lib.pmemobj_tx_stage()
+        #log.debug('__exit__: %s', args)
         if stage == lib.TX_STAGE_WORK:
             if args[0] is None:
+                #log.debug('committing')
                 # If this fails we get a non-zero errno from tx_end and
                 # _end_transaction will raise it.
                 lib.pmemobj_tx_commit()
             else:
+                #log.debug('aborting')
                 # We have a Python exception that didn't result from an error
                 # in the pmemobj library, so manually roll back the transaction
                 # since the python block won't complete.
                 # XXX we should maybe use a unique error code here and raise an
                 # error on ECANCELED, I'm not sure.
-                self.abort_transaction()
-                # XXX It seems like we can't call tx_end after this, at least
-                # not in debug mode, despite the docs saying we should.
-                return
+                lib.pmemobj_tx_abort(0)
         self._end_transaction()
 
     #

@@ -71,6 +71,17 @@ class Test(TestCase):
         pop = pmemobj.open(fn)
         self.assertEqual(pop.root, test_list)
 
+    def test_transaction_abort_on_python_exception(self):
+        fn = self._test_fn()
+        pop = pmemobj.create(fn)
+        def tester():
+            with pop:
+                pop.root = 10
+                raise Exception('boo')
+        with self.assertRaises(Exception):
+            tester()
+        self.assertEqual(pop.root, None)
+
 
 @parameterize
 class TestSimpleImmutablePersistence(TestCase):
@@ -82,7 +93,7 @@ class TestSimpleImmutablePersistence(TestCase):
     if sys.version_info[0] < 3:
         objs_params['long_int'] = sys.maxint * 2
 
-    def objs_as_persisting(self, obj):
+    def objs_as_root_object(self, obj):
         fn = self._test_fn()
         pop = pmemobj.create(fn)
         pop.root = obj
