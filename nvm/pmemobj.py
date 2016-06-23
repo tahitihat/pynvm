@@ -475,6 +475,26 @@ class PersistentObjectPool(object):
     def _resurrect_builtins_float(self, obj_ptr):
         return ffi.cast('PFloatObject *', obj_ptr).fval
 
+    def _persist_builtins_int(self, i):
+        # Make sure we get the int type even on python2.  The space is needed.
+        type_code = self._get_type_code(1 .__class__)
+        # In theory we could copy the actual CPython data directly here,
+        # but that would mean we'd break on PyPy, etc.  So we serialize.
+        i = repr(i)
+        if sys.version_info[0] < 3:
+            i = i.rstrip('L')
+        with self:
+            # There's a bit of extra overhead in reusing this, but not much.
+            p_int_oid = self._persist_builtins_str(i)
+            p_int = ffi.cast('PObject *', self._direct(p_int_oid))
+            p_int.ob_type = type_code
+        return p_int_oid
+    _persist_builtins_long = _persist_builtins_int
+
+    def _resurrect_builtins_int(self, obj_ptr):
+        i_str = self._resurrect_builtins_str(obj_ptr)
+        return int(i_str)
+
     def _incref(self, oid):
         log.debug('incref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))

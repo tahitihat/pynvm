@@ -75,7 +75,12 @@ class Test(TestCase):
 @parameterize
 class TestSimpleImmutablePersistence(TestCase):
 
-    objs_params = dict(float=[10.5], string=['abcde'], ustring=['abő'])
+    objs_params = dict(int=5,
+                       float=10.5,
+                       string='abcde',
+                       ustring='abő')
+    if sys.version_info[0] < 3:
+        objs_params['long_int'] = sys.maxint * 2
 
     def objs_as_persisting(self, obj):
         fn = self._test_fn()
