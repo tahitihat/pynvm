@@ -13,7 +13,7 @@ pmemobj_structs = """
         size_t ob_type;
         } PObject;
     typedef struct {
-        PObjPtr ob_base;
+        PObject ob_base;
         size_t ob_size;
         } PVarObject;
     typedef struct {
@@ -134,6 +134,9 @@ ffi.cdef("""
     PMEMoid pmemobj_tx_strdup(const char *s, uint64_t type_num);
     int pmemobj_tx_free(PMEMoid oid);
     enum pobj_tx_stage pmemobj_tx_stage(void);
+    PMEMoid pmemobj_first(PMEMobjpool *pop);
+    PMEMoid pmemobj_next(PMEMoid oid);
+    uint64_t pmemobj_type_num(PMEMoid oid);
 
 """ + pmemobj_structs)
 

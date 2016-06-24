@@ -35,6 +35,9 @@ layout_version = 'pypmemobj-{}.{}.{}'.format(*layout_info).encode()
 MIN_POOL_SIZE = lib.PMEMOBJ_MIN_POOL
 MAX_OBJ_SIZE = lib.PMEMOBJ_MAX_ALLOC_SIZE
 OID_NULL = lib.OID_NULL
+# Arbitrary numbers.
+POBJECT_TYPE_NUM = 20
+POBJPTR_ARRAY_TYPE_NUM = 21
 
 def _is_OID_NULL(oid):
     # XXX I think == should work here, but it doesn't.
@@ -202,15 +205,19 @@ class PersistentObjectPool(object):
             self._init_caches()
             size = lib.pmemobj_root_size(self._pool_ptr)
             if size:
-                pmem_root = self._direct(oid_wrapper(lib.pmemobj_root(self._pool_ptr, 0)))
+                pmem_root = self._direct(oid_wrapper(
+                                lib.pmemobj_root(self._pool_ptr, 0)))
                 pmem_root = ffi.cast('PRoot *', pmem_root)
-            # XXX I'm not sure the check for pmem_root not NULL is needed.
+            # I'm not sure the check for pmem_root not NULL is needed.
             if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
                 raise RuntimeError("Pool {} not initialized completely".format(
                     self.filename))
-            self._type_table = self._resurrect(oid_wrapper(pmem_root.type_table))
-            self._root = self._resurrect(oid_wrapper(pmem_root.root_object))
             self._pmem_root = pmem_root
+            self._type_table = self._resurrect(oid_wrapper(pmem_root.type_table))
+            # Make sure any objects orphaned by a crash are cleaned up.
+            self.gc()
+            # Resurrect the root object.
+            self._root = self._resurrect(oid_wrapper(pmem_root.root_object))
 
     def close(self):
         """This method closes the object pool.  The object pool itself lives on
@@ -218,6 +225,8 @@ class PersistentObjectPool(object):
         all the objects in it accessed, using :func:`~nvm.pmemlog.open`.
         """
         log.debug('close')
+        # Clean up unreferenced object cycles.
+        self.gc()
         lib.pmemobj_close(self._pool_ptr)
         self.closed = True
 
@@ -231,13 +240,14 @@ class PersistentObjectPool(object):
     @root.setter
     def root(self, value):
         log.debug("setting 'root' to %r", value)
-        # XXX need a lock, an incref, and a conditional decref.
-        with self:
+        with self, self.lock:
             oid = self._persist(value)
             self._tx_add_range_direct(
                 ffi.addressof(self._pmem_root.root_object),
                 ffi.sizeof('PObjPtr'))
+            self._xdecref(oid_wrapper(self._pmem_root.root_object))
             self._pmem_root.root_object = oid.oid
+            self._incref(oid)
 
     #
     # Transaction management
@@ -301,26 +311,29 @@ class PersistentObjectPool(object):
     # transaction executing in a given thread at a time.  XXX should add a
     # check for this, probably in __enter__.
 
-    # XXX should use a non-zero type code, so we can use it to walk the list of
-    # all allocated objects in the cyclic GC that doesn't exist yet.
-
-    def _malloc(self, size):
+    def _malloc(self, size, type_num=POBJECT_TYPE_NUM):
         """Return a pointer to size bytes of newly allocated persistent memory.
+
+        By default the pmemobject type number is POBJECT_TYPE_NUM; be careful
+        to specify a different type number for non-PObject allocations.
         """
-        # For now, just use the underlying allocator...later we'll write a
-        # small object allocator on top, and the pointer size will grow.
         log.debug('malloc: %r', size)
         if size == 0:
             return oid_wrapper(OID_NULL)
-        return _check_oid(lib.pmemobj_tx_zalloc(size, 0))
+        oid = _check_oid(lib.pmemobj_tx_zalloc(size, type_num))
+        log.debug('oid: %s', oid)
+        return oid
 
     def _malloc_ptrs(self, count):
         """Return pointer to enough persistent memory for count pointers.
+
+        The pmem type number is set to POBJPTR_ARRAY_TYPE_NUM.
         """
         log.debug('malloc_ptrs: %r', count)
-        return self._malloc(count * ffi.sizeof('PObjPtr'))
+        return self._malloc(count * ffi.sizeof('PObjPtr'),
+                            type_num=POBJPTR_ARRAY_TYPE_NUM)
 
-    def _realloc(self, oid, size):
+    def _realloc(self, oid, size, type_num=None):
         """Copy oid contents into size bytes of new persistent memory.
 
         Return pointer to the new memory.
@@ -329,12 +342,17 @@ class PersistentObjectPool(object):
         if size == 0:
             self._free(oid)
             return oid_wrapper(OID_NULL)
-        return _check_oid(lib.pmemobj_tx_zrealloc(oid.oid, size, 0))
+        if type_num is None:
+            type_num = lib.pmemobj_type_num(oid.oid)
+        oid = _check_oid(lib.pmemobj_tx_zrealloc(oid.oid, size, type_num))
+        log.debug('oid: %s', oid)
+        return oid
 
     def _realloc_ptrs(self, oid, count):
         log.debug('realloc_ptrs: %r %r', oid, count)
         """As _realloc, but the new memory is enough for count pointers."""
-        return self._realloc(oid, count * ffi.sizeof('PObjPtr'))
+        return self._realloc(oid, count * ffi.sizeof('PObjPtr'),
+                             POBJPTR_ARRAY_TYPE_NUM)
 
     def _free(self, oid):
         """Free the memory pointed to by oid."""
@@ -372,12 +390,12 @@ class PersistentObjectPool(object):
         cls_str = _class_string(cls)
         try:
             code = self._type_table.index(cls_str)
-            log.debug('type_code: %r', code)
+            log.debug('type_code for %s: %r', cls_str, code)
             return code
         except ValueError:
             self._type_table.append(cls_str)
             code = len(self._type_table) - 1
-            log.debug('new type_code: %r', code)
+            log.debug('new type_code for %s: %r', cls_str, code)
             return code
 
     def _persist(self, obj):
@@ -397,7 +415,7 @@ class PersistentObjectPool(object):
         oid = getattr(self, persister)(obj)
         self._persist_cache[key] = oid
         self._resurrect_cache[oid] = obj
-        log.debug('new oid: %r', oid)
+        log.debug('new %s object: %r', cls_str, oid)
         return oid
 
     def _resurrect(self, oid):
@@ -498,6 +516,7 @@ class PersistentObjectPool(object):
         return int(i_str)
 
     def _incref(self, oid):
+        """Increment the reference count of oid."""
         log.debug('incref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
         with self:
@@ -505,6 +524,7 @@ class PersistentObjectPool(object):
             p_obj.ob_refcnt += 1
 
     def _decref(self, oid):
+        """Decrement the reference count of oid, and free it if zero."""
         log.debug('decref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
         with self:
@@ -512,9 +532,55 @@ class PersistentObjectPool(object):
             assert p_obj.ob_refcnt > 0
             p_obj.ob_refcnt -= 1
             if p_obj.ob_refcnt < 1:
-                # XXX this needs to check for a del 'slot' and call it
-                # if it exists (equivalent to CPython's tp_del).
-                self._free(oid)
+                self._finalize(oid)
+
+    def _xdecref(self, oid):
+        """decref oid if it is not OID_NULL."""
+        if not _is_OID_NULL(oid):
+            self._decref(oid)
+
+    def _finalize(self, oid):
+        """Deallocate the memory occupied by oid."""
+        # XXX this needs to check for a del 'slot' and call it
+        # if it exists (equivalent to CPython's tp_del).
+        log.debug("finalizing %s", oid)
+        with self:
+            self._free(oid)
+
+    def gc(self):
+        """Examine all PObjects and free those no longer referenced.
+
+        There are two aspects to this: gc run at startup will clear out objects
+        that were allocated but never assigned, and gc run other times (eg: on
+        close) will look for cycles of objects with no external references and
+        free the cycles.
+
+        This is a public method to allow an application to clean up cycles
+        on demand.  It is not run automatically except at open and close.
+        """
+        # XXX Need to enhance this to also be a mark and sweep GC.
+        oid = oid_wrapper(lib.pmemobj_first(self._pool_ptr))
+        while not _is_OID_NULL(oid):
+            # Grab the next oid now so that we can delete the current obj
+            # without losing the chain.  XXX This isn't adequate.  Finalizing
+            # a container might free next_oid.  Mark and sweep may solve this.
+            next_oid = oid_wrapper(lib.pmemobj_next(oid.oid))
+            type_num = lib.pmemobj_type_num(oid.oid)
+            if type_num != POBJECT_TYPE_NUM:
+                log.debug('gc: non-POBJECT (type_num %s): %s', type_num, oid)
+            else:
+                obj = ffi.cast('PObject *', self._direct(oid))
+                log.debug('gc: object %s refcnt %s type %s (%s) %.40r',
+                          oid,
+                          obj.ob_refcnt,
+                          self._type_table[obj.ob_type],
+                          obj.ob_type,
+                          self._resurrect(oid))
+                assert obj.ob_refcnt >= 0, 'negative refcnt'
+                if obj.ob_refcnt == 0:
+                    self._finalize(oid)
+            oid = next_oid
+
 
     def new(self, typ, *args, **kw):
         log.debug('new: %s, %s, %s', typ, args, kw)
@@ -567,10 +633,13 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     pmem_root = ffi.cast('PRoot *', pop._direct(oid_wrapper(pmem_root)))
     with pop:
         # Dummy first two elements; they are handled as special cases.
-        type_table = PersistentList(['', ''], __manager__=pop)
+        type_table = PersistentList(
+            [_class_string(PersistentList), _class_string(str)],
+            __manager__=pop)
         lib.pmemobj_tx_add_range_direct(pmem_root, ffi.sizeof('PRoot'))
         pmem_root.type_table = type_table._oid.oid
-        temp = pmem_root.type_table
+        pop._incref(type_table._oid)
+        pop._resurrect_cache[type_table._oid] = type_table
         pop._pmem_root = pmem_root
     pop._type_table = type_table
     return pop
@@ -586,6 +655,8 @@ class PersistentList(abc.MutableSequence):
 
     # XXX locking!
     # XXX tp_del method (see _decref)
+    # XXX All bookkeeping attrs should be _v_xxxx so that all other attrs
+    #     (other than __manager__) can be made persistent.
 
     def __init__(self, *args, **kw):
         if '__manager__' not in kw:
@@ -681,7 +752,7 @@ class PersistentList(abc.MutableSequence):
         if index < 0:
             index += self._size
         if index < 0 or index >= self._size:
-            raise IndexError
+            raise IndexError(index)
         return index
 
     def __setitem__(self, index, value):
