@@ -39,10 +39,10 @@ OID_NULL = lib.OID_NULL
 POBJECT_TYPE_NUM = 20
 POBJPTR_ARRAY_TYPE_NUM = 21
 
-def _is_OID_NULL(oid):
-    # XXX I think == should work here, but it doesn't.
-    return (oid.oid.pool_uuid_lo == OID_NULL.pool_uuid_lo
-            and oid.oid.off == OID_NULL.off)
+def _oids_eq(oid1, oid2):
+    # XXX I don't see why == couldn't work on ctype structs, but it doesn't.
+    return (oid1.pool_uuid_lo == oid2.pool_uuid_lo
+            and oid2.off == oid2.off)
 
 class oid_wrapper(object):
     """Helper class to deal with cffi structs not supporting ==.
@@ -106,7 +106,7 @@ def _check_oid(oid):
     """Raise an error if oid is OID_NULL, otherwise return it.
     """
     oid = oid_wrapper(oid)
-    if _is_OID_NULL(oid):
+    if _oids_eq(OID_NULL, oid.oid):
         _raise_per_errno()
     return oid
 
@@ -427,15 +427,12 @@ class PersistentObjectPool(object):
         # XXX need multiple debug levels
         #log.debug('resurrect: %r', oid)
         try:
-            # XXX The fact that oid == OID_NULL doesn't work probably
-            # implies that this cache isn't going to work either, so
-            # we'll need to debug that soon.
             obj = self._resurrect_cache[oid]
             #log.debug('resurrect from cache: %r', self._resurrect_cache[oid])
             return obj
         except KeyError:
             pass
-        if _is_OID_NULL(oid):
+        if _oids_eq(OID_NULL, oid.oid):
             # XXX I'm not sure we can get away with mapping OID_NULL
             # to None here, but try it and see.
             self._resurrect_cache[oid] = None
@@ -541,7 +538,7 @@ class PersistentObjectPool(object):
 
     def _xdecref(self, oid):
         """decref oid if it is not OID_NULL."""
-        if not _is_OID_NULL(oid):
+        if not _oids_eq(OID_NULL, oid.oid):
             self._decref(oid)
 
     def _deallocate(self, oid):
@@ -578,7 +575,7 @@ class PersistentObjectPool(object):
         orphans = set()
         types = {}
         oid = oid_wrapper(lib.pmemobj_first(self._pool_ptr))
-        while not _is_OID_NULL(oid):
+        while not _oids_eq(OID_NULL, oid.oid):
             type_num = lib.pmemobj_type_num(oid.oid)
             # XXX Could make the _PTR lists PObjects too so they are tracked.
             if type_num == POBJECT_TYPE_NUM:
@@ -765,7 +762,7 @@ class PersistentList(abc.MutableSequence):
     @property
     def _items(self):
         ob_items = oid_wrapper(self._body.ob_items)
-        if _is_OID_NULL(ob_items):
+        if _oids_eq(OID_NULL, ob_items.oid):
             return None
         return ffi.cast('PObjPtr *',
                         self.__manager__._direct(ob_items))
