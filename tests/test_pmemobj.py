@@ -43,12 +43,14 @@ class Test(TestCase):
     def test_implicit_close_after_create(self):
         fn = self._test_fn()
         pop = pmemobj.create(fn)
+        del pop
 
     def test_implicit_close_after_open(self):
         fn = self._test_fn()
         pop = pmemobj.create(fn)
         pop.close()
         pop = pmemobj.open(fn)
+        del pop
 
     def test_small_pool_size_error(self):
         fn = self._test_fn()
@@ -66,6 +68,7 @@ class Test(TestCase):
         test_list = ['a', 'b', 'c', 'd']
         fn = self._test_fn()
         pop = pmemobj.create(fn)
+        self.addCleanup(pop.close)
         pop.root = pop.new(pmemobj.PersistentList, test_list)
         pop.close()
         pop = pmemobj.open(fn)
@@ -74,6 +77,7 @@ class Test(TestCase):
     def test_transaction_abort_on_python_exception(self):
         fn = self._test_fn()
         pop = pmemobj.create(fn)
+        self.addCleanup(pop.close)
         def tester():
             with pop:
                 pop.root = 10
@@ -102,6 +106,7 @@ class TestSimpleImmutablePersistence(TestCase):
     def objs_as_root_object(self, obj):
         fn = self._test_fn()
         pop = pmemobj.create(fn)
+        self.addCleanup(pop.close)
         pop.root = obj
         self.assertEqual(pop.root, obj)
         pop.close()
@@ -115,6 +120,7 @@ class TestPersistentList(TestCase):
     def _make_list(self, arg):
         self.fn = self._test_fn()
         self.pop = pmemobj.create(self.fn)
+        self.addCleanup(self.pop.close)
         self.pop.root = self.pop.new(pmemobj.PersistentList, arg)
         return self.pop.root
 
