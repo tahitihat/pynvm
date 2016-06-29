@@ -8,6 +8,7 @@ from tests.parameterize import parameterize
 from nvm import pmemobj
 
 
+# This is an ugly hack but it works; you have to say "-v -v", not "-vv".
 verbose = sys.argv.count('-v') + sys.argv.count('--verbose')
 verbose += int(os.environ.get('TEST_VERBOSE', 0))
 if verbose > 1:

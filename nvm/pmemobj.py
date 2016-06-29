@@ -532,6 +532,7 @@ class PersistentObjectPool(object):
         log.debug('decref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
         with self:
+            # XXX also need to remove oid from resurrect cache
             self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
             assert p_obj.ob_refcnt > 0
             p_obj.ob_refcnt -= 1
@@ -553,6 +554,7 @@ class PersistentObjectPool(object):
                 obj._deallocate()
             self._free(oid)
 
+    # If I didn't have to support python2 I'd make debug keyword only.
     def gc(self, debug=False):
         """Examine all PObjects and free those no longer referenced.
 
