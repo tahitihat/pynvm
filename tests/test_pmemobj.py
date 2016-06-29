@@ -82,6 +82,12 @@ class Test(TestCase):
             tester()
         self.assertEqual(pop.root, None)
 
+    def test_duplicate_close(self):
+        fn = self._test_fn()
+        pop = pmemobj.create(fn)
+        pop.close()
+        pop.close()
+
 
 @parameterize
 class TestSimpleImmutablePersistence(TestCase):

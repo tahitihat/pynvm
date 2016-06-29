@@ -225,15 +225,18 @@ class PersistentObjectPool(object):
         in the file that contains it and may be reopened at a later date, and
         all the objects in it accessed, using :func:`~nvm.pmemlog.open`.
         """
-        log.debug('close')
-        # Clean up unreferenced object cycles.
-        self.gc()
-        lib.pmemobj_close(self._pool_ptr)
-        self.closed = True
+        with self.lock:
+            if self.closed:
+                log.debug('already closed')
+                return
+            log.debug('close')
+            self.closed = True     # doing this early helps with debugging
+            # Clean up unreferenced object cycles.
+            self.gc()
+            lib.pmemobj_close(self._pool_ptr)
 
     def __del__(self):
-        if not self.closed:
-            self.close()
+        self.close()
 
     @property
     def root(self):
