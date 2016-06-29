@@ -44,6 +44,10 @@ def _oids_eq(oid1, oid2):
     return (oid1.pool_uuid_lo == oid2.pool_uuid_lo
             and oid2.off == oid2.off)
 
+def _oid_key(oid):
+    # Return a hashable key that represents an PMEMoid.
+    return (oid.pool_uuid_lo, oid.off)
+
 class oid_wrapper(object):
     """Helper class to deal with cffi structs not supporting ==.
 
@@ -379,7 +383,7 @@ class PersistentObjectPool(object):
         self._type_code_cache = {PersistentList: 0, str: 1}
         self._persist_cache = {}
         # XXX WeakValueDictionary?
-        self._resurrect_cache = {oid_wrapper(OID_NULL): None}
+        self._resurrect_cache = {_oid_key(OID_NULL): None}
 
     def _get_type_code(self, cls):
         """Return the index into the type table for cls.
@@ -418,7 +422,7 @@ class PersistentObjectPool(object):
             raise TypeError("Don't know now to persist {!r}".format(cls_str))
         oid = getattr(self, persister)(obj)
         self._persist_cache[key] = oid
-        self._resurrect_cache[oid] = obj
+        self._resurrect_cache[_oid_key(oid.oid)] = obj
         log.debug('new %s object: %r', cls_str, oid)
         return oid
 
@@ -427,7 +431,7 @@ class PersistentObjectPool(object):
         # XXX need multiple debug levels
         #log.debug('resurrect: %r', oid)
         try:
-            obj = self._resurrect_cache[oid]
+            obj = self._resurrect_cache[_oid_key(oid.oid)]
             #log.debug('resurrect from cache: %r', self._resurrect_cache[oid])
             return obj
         except KeyError:
@@ -435,14 +439,14 @@ class PersistentObjectPool(object):
         if _oids_eq(OID_NULL, oid.oid):
             # XXX I'm not sure we can get away with mapping OID_NULL
             # to None here, but try it and see.
-            self._resurrect_cache[oid] = None
+            self._resurrect_cache[_oid_key(oid.oid)] = None
             return None
         obj_ptr = ffi.cast('PObject *', self._direct(oid))
         type_code = obj_ptr.ob_type
         # The special cases are to avoid infinite regress in the type table.
         if type_code == 0:
             res = PersistentList(__manager__=self, _oid=oid)
-            self._resurrect_cache[oid] = res
+            self._resurrect_cache[_oid_key(oid.oid)] = res
             log.debug('resurrect PersistentList: %r', res)
             return res
         if type_code == 1:
@@ -458,7 +462,11 @@ class PersistentObjectPool(object):
                       oid, cls_str, res)
             return res
         res = getattr(self, resurrector)(obj_ptr)
-        self._resurrect_cache[oid] = res
+        self._resurrect_cache[_oid_key(oid.oid)] = res
+        # XXX This could be a problem, but hopefully it will just work.  In
+        # theory every PMEMoid stored here is one returned by a malloc call,
+        # and so is an unchanging canonical pointer to the memory.  And
+        # hopefully anywhere it gets assigned ends up copying the data.
         self._persist_cache[res] = oid
         log.debug('resurrect %r: immutable type (%r): %r',
                   oid, resurrector, res)
@@ -529,7 +537,7 @@ class PersistentObjectPool(object):
         log.debug('decref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
         with self:
-            # XXX also need to remove oid from resurrect cache
+            # XXX also need to remove oid from resurrect and persist caches
             self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
             assert p_obj.ob_refcnt > 0
             p_obj.ob_refcnt -= 1
@@ -711,7 +719,7 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
         lib.pmemobj_tx_add_range_direct(pmem_root, ffi.sizeof('PRoot'))
         pmem_root.type_table = type_table._oid.oid
         pop._incref(type_table._oid)
-        pop._resurrect_cache[type_table._oid] = type_table
+        pop._resurrect_cache[_oid_key(type_table._oid.oid)] = type_table
         pop._pmem_root = pmem_root
     pop._type_table = type_table
     return pop
