@@ -1,32 +1,11 @@
 # -*- coding: utf8 -*-
-import os
 import sys
 import unittest
-import uuid
 
-from contextlib import contextmanager
-from tests.parameterize import parameterize
 from nvm import pmemobj
 
+from tests.support import TestCase, parameterize
 
-# This is an ugly hack but it works; you have to say "-v -v", not "-vv".
-verbose = sys.argv.count('-v') + sys.argv.count('--verbose')
-verbose += int(os.environ.get('TEST_VERBOSE', 0))
-if verbose > 1:
-    import logging
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s %(name)-15s %(levelname)-8s %(message)s')
-
-
-
-class TestCase(unittest.TestCase):
-
-    # XXX I'm not sure how one gets a real pmem file, so keep this factored.
-    def _test_fn(self):
-        fn = "{}.pmem".format(uuid.uuid4())
-        self.addCleanup(lambda: os.remove(fn) if os.path.exists(fn) else None)
-        return fn
 
 
 class TestPersistentObjectPool(TestCase):
