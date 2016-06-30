@@ -9,6 +9,7 @@
 
 # XXX Time to break this up into a package.
 
+import collections
 try:
     import collections.abc as abc
 except ImportError:
@@ -24,6 +25,28 @@ import sys
 from pickle import whichmodule
 from threading import RLock
 from _pmem import lib, ffi
+
+try:
+    from reprlib import recursive_repr
+except ImportError:
+    from thread import get_ident
+    def recursive_repr(fillvalue='...'):
+        'Decorator to make a repr function return fillvalue for a recursive call'
+        def decorating_function(user_function):
+            repr_running = set()
+            def wrapper(self):
+                key = id(self), get_ident()
+                if key in repr_running:
+                    return fillvalue
+                repr_running.add(key)
+                try:
+                    result = user_function(self)
+                finally:
+                    repr_running.discard(key)
+                return result
+            return wrapper
+        return decorating_function
+
 
 log = logging.getLogger('pynvm.pmemobj')
 
@@ -47,6 +70,8 @@ def _oids_eq(oid1, oid2):
 
 def _oid_key(oid):
     """Return a hashable key that represents an PMEMoid."""
+    if isinstance(oid, tuple):
+        return oid
     return (oid.pool_uuid_lo, oid.off)
 
 # XXX move this to a central location and use in all libraries.
@@ -68,6 +93,8 @@ def _raise_per_errno():
     # XXX should probably check for errno 0 and/or an unset message.
     err = ffi.errno
     msg = ffi.string(lib.pmemobj_errormsg())
+    if err == 0:
+        raise OSError("raise_per_errno called with errno 0", 0)
     # In python3 OSError would do this check for us.
     if err == errno.EINVAL:
         raise ValueError(msg)
@@ -554,7 +581,6 @@ class PersistentObjectPool(object):
         # less linear performance against the total number of objects.
         # Currently we are not doing generations; we can get more complicated
         # later if we want to run the GC periodically.
-        # XXX CPython collects statistics, perhaps we should too.
 
         log.debug('gc: start')
         containers = set()
@@ -562,6 +588,10 @@ class PersistentObjectPool(object):
         orphans = set()
         oid_map = {}
         types = {}
+        type_counts = collections.defaultdict(int)
+        gc_counts = collections.defaultdict(int)
+
+        # Catalog all PObjects.
         oid = lib.pmemobj_first(self._pool_ptr)
         while not _oids_eq(OID_NULL, oid):
             o_key = _oid_key(oid)
@@ -574,37 +604,44 @@ class PersistentObjectPool(object):
                     if obj.ob_refcnt < 0:
                         log.error("Negative refcount (%s): %s %r",
                                   obj.ob_refcnt, o_key, self._resurrect(oid))
-                assert obj.ob_refcnt > 0, '%s has negative refcnt' % o_key
+                assert obj.ob_refcnt >= 0, '%s has negative refcnt' % o_key
                 # XXX move this cache to the POP?
                 type_code = obj.ob_type
                 if type_code not in types:
                     types[type_code] = _find_class_from_string(
                                             self._type_table[type_code])
                 typ = types[type_code]
-                if hasattr(typ, '_traverse'):
-                    if debug:
-                        log.debug('gc: container: %s %s %r',
-                                  o_key, obj.ob_refcnt, self._resurrect(oid))
-                    containers.add(o_key)
-                elif not obj.ob_refcnt:
+                type_counts[typ.__name__] += 1
+                if not obj.ob_refcnt:
                     if debug:
                         log.debug('gc: orphan: %s %s %r',
                                   o_key, obj.ob_refcnt, self._resurrect(oid))
                     orphans.add(o_key)
+                elif hasattr(typ, '_traverse'):
+                    if debug:
+                        log.debug('gc: container: %s %s %r',
+                                  o_key, obj.ob_refcnt, self._resurrect(oid))
+                    containers.add(o_key)
                 else:
                     if debug:
                         log.debug('gc: other: %s %s %r',
                                   o_key, obj.ob_refcnt, self._resurrect(oid))
                     other.add(o_key)
             oid = lib.pmemobj_next(oid)
+        gc_counts['containers-total'] = len(containers)
+        gc_counts['other-total'] = len(other)
 
+        # Clean up refcount 0 orphans (from a crash or code bug).
         log.debug("gc: deallocating %s orphans", len(orphans))
+        gc_counts['orphans0-gced'] = len(orphans)
         for o_key in orphans:
             if debug:
+                # XXX This should be a non debug warning on close.
                 log.warning("deallocating orphan (refcount 0): %s %r",
                             o_key, self._resurrect(oid))
             self._deallocate(oid_map[o_key])
 
+        # Trace the object tree, removing objects that are referenced.
         tt_key = _oid_key(self._type_table._oid)
         containers.remove(tt_key)
         live = [tt_key]
@@ -635,17 +672,30 @@ class PersistentObjectPool(object):
                         log.debug('gc: refed oid %s %r',
                                   sub_key, self._resurrect(sub_oid))
                     other.remove(sub_key)
+                    gc_counts['other-live'] += 1
+        gc_counts['containers-live'] = len(live)
 
-        # Everything left is unreferenced via the root.
+        # Everything left is unreferenced via the root, deallocate it.
         log.debug('gc: deallocating %s containers', len(containers))
         for o_key in containers:
+            if debug:
+                oid = oid_map[o_key]
+                obj = self._resurrect(oid)
+                log.debug('gc: deallocating container %s %r', o_key, obj)
+                for sub_oid in obj:
+                    # XXX this is wrong, could multi-count if multiple refs.
+                    # XXX and what if the sub_oid is in containers with ref 0?
+                    gc_counts['other-gced'] += 1
             self._deallocate(oid_map[o_key])
         log.debug('gc: deallocating %s new orphans', len(other))
+        gc_counts['orphans1-gced'] = len(other)
         for o_key in other:
             log.warning("Orphaned with postive refcount: %s: %s",
                 o_key, self._resurrect(oid))
             self._deallocate(oid_map[o_key])
         log.debug('gc: end')
+
+        return dict(type_counts), dict(gc_counts)
 
     def new(self, typ, *args, **kw):
         log.debug('new: %s, %s, %s', typ, args, kw)
@@ -744,6 +794,8 @@ class PersistentList(abc.MutableSequence):
                 raise TypeError("PersistentList takes at most 1"
                                 " argument, {} given".format(len(args)))
             self.extend(args[0])
+
+    # Methods and properties needed to implement the ABC required methods.
 
     @property
     def _size(self):
@@ -854,6 +906,9 @@ class PersistentList(abc.MutableSequence):
     def __len__(self):
         return self._size
 
+    # Additional list methods not provided by the ABC.
+
+    @recursive_repr()
     def __repr__(self):
         return "{}([{}])".format(self.__class__.__name__,
                                  ', '.join("{!r}".format(x) for x in self))
@@ -874,14 +929,27 @@ class PersistentList(abc.MutableSequence):
                 return False
         return True
 
+    def clear(self):
+        if self._size == 0:
+            return
+        mm = self.__manager__
+        items = self._items
+        with mm:
+            for i in range(self._size):
+                oid = items[i]
+                o_key = _oid_key(oid)
+                if _oids_eq(OID_NULL, oid):
+                    continue
+                items[i] = OID_NULL
+                mm._decref(o_key)
+            self._resize(0)
+
+    # Additional methods required by the pmemobj API.
+
     def _traverse(self):
         items = self._items
         for i in range(len(self)):
             yield items[i]
 
     def _deallocate(self):
-        with self.__manager__:
-            for oid in self._traverse():
-                self.__manager__._decref(oid)
-            ob_items = self._body.ob_items
-            self.__manager__._free(ob_items)
+        self.clear()

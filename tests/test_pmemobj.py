@@ -4,6 +4,7 @@ import sys
 import unittest
 import uuid
 
+from contextlib import contextmanager
 from tests.parameterize import parameterize
 from nvm import pmemobj
 
@@ -114,6 +115,69 @@ class TestSimpleImmutablePersistence(TestCase):
         pop = pmemobj.open(fn)
         self.assertEqual(pop.root, obj)
         pop.close()
+
+
+class TestGC(TestCase):
+
+    def _pop(self):
+        self.fn = self._test_fn()
+        pop = pmemobj.create(self.fn)
+        self.addCleanup(pop.close)
+        return pop
+
+    def assertGCCollectedNothing(self, gc_counts):
+        for k in [k for k in gc_counts.keys() if k.endswith('-gced')]:
+            self.assertEqual(gc_counts[k], 0)
+
+    def test_type_count(self):
+        pop = self._pop()
+        type_counts, gc_counts = pop.gc(debug=True)
+        # The type table is a persistent list, and each type string
+        # it stores is a string, and we have two types to start with.
+        self.assertEqual(type_counts, {
+            'PersistentList': 1,
+            'str': 2,
+            })
+        pop.root = pop.new(pmemobj.PersistentList, [1, 'a', 3.6, 3])
+        type_counts, gc_counts = pop.gc(debug=True)
+        # Now we also have two additional types.
+        self.assertEqual(type_counts, {
+            'PersistentList': 2,
+            'int': 2,
+            'str': 5,
+            'float': 1,
+            })
+
+
+    def test_root_immutable_assignment_gcs(self):
+        pop = self._pop()
+        pop.root = 12
+        before = pop.gc(debug=True)
+        pop.root = 15
+        after = pop.gc(debug=True)
+        # We've replaced one int with another, so the types counts should be
+        # the same if the first one was deallocated.
+        self.assertEqual(before, after)
+        # Nothing should have been collected, since refcounting handles it.
+        self.assertGCCollectedNothing(after[1])
+
+    def test_root_container_assignment_gcs(self):
+        pop = self._pop()
+        pop.root = pop.new(pmemobj.PersistentList, [1, 2])
+        before = pop.gc(debug=True)
+        pop.root = pop.new(pmemobj.PersistentList, [3, 4])
+        after = pop.gc(debug=True)
+        # Again we've replaced the value with one with equivalent counts.
+        self.assertEqual(before, after)
+        # Nothing should have been collected, since refcounting handles it.
+        self.assertGCCollectedNothing(after[1])
+
+    def test_collect_orphan(self):
+        pop = self._pop()
+        pop.new(pmemobj.PersistentList)
+        type_counts, gc_counts = pop.gc()
+        self.assertEqual(gc_counts['orphans0-gced'], 1)
+        self.assertGCCollectedNothing(pop.gc()[1])
 
 
 class TestPersistentList(TestCase):
@@ -235,6 +299,14 @@ class TestPersistentList(TestCase):
             lst = self._reread_list()
             self.assertEqual(len(lst), i)
             lst.append('a')
+
+    def test_clear(self):
+        lst = self._make_list([1, 3, 2])
+        lst.clear()
+        self.assertEqual(lst, [])
+        # Make sure the clear didn't break it.
+        lst.append(1)
+        self.assertEqual(lst, [1])
 
 
 if __name__ == '__main__':
