@@ -62,17 +62,21 @@ OID_NULL = lib.OID_NULL
 POBJECT_TYPE_NUM = 20
 POBJPTR_ARRAY_TYPE_NUM = 21
 
-def _oids_eq(oid1, oid2):
-    """Return True if the two fields of both PMEMoids match."""
-    # XXX I don't see why == couldn't work on ctype structs, but it doesn't.
-    return (oid1.pool_uuid_lo == oid2.pool_uuid_lo
-            and oid2.off == oid2.off)
-
-def _oid_key(oid):
-    """Return a hashable key that represents an PMEMoid."""
+# In general an oid is going to already be in tuple form, since that's what the
+# memory management routines return.  But sometimes we get an PMEMoid from a
+# list of pointers.  So we have to call _oid_as_tuple at a couple of other
+# strategic locations to make handling oids as transparent as possible.  This
+# all works because the tuple can be assigned to a "ctype PMEMoid &" and
+# likewise be used as the argument to a function that takes a PMEMoid by value.
+def _oid_as_tuple(oid):
+    """Return the oid as a tuple, return it unchanged if it already is one."""
     if isinstance(oid, tuple):
         return oid
     return (oid.pool_uuid_lo, oid.off)
+
+def _oids_eq(oid1, oid2):
+    """Return True if the two oids hold the same data."""
+    return _oid_as_tuple(oid1) == _oid_as_tuple(oid2)
 
 # XXX move this to a central location and use in all libraries.
 def _coerce_fn(file_name):
@@ -336,8 +340,8 @@ class PersistentObjectPool(object):
         log.debug('malloc: %r', size)
         if size == 0:
             return OID_NULL
-        oid = _check_oid(lib.pmemobj_tx_zalloc(size, type_num))
-        log.debug('oid: %s', _oid_key(oid))
+        oid = _oid_as_tuple(_check_oid(lib.pmemobj_tx_zalloc(size, type_num)))
+        log.debug('oid: %s', oid)
         return oid
 
     def _malloc_ptrs(self, count):
@@ -354,17 +358,19 @@ class PersistentObjectPool(object):
 
         Return pointer to the new memory.
         """
-        log.debug('realloc: %r %r', _oid_key(oid), size)
+        oid = _oid_as_tuple(oid)
+        log.debug('realloc: %r %r', oid, size)
         if size == 0:
             self._free(oid)
             return OID_NULL
         if type_num is None:
             type_num = lib.pmemobj_type_num(oid)
         oid = _check_oid(lib.pmemobj_tx_zrealloc(oid, size, type_num))
-        log.debug('oid: %s', _oid_key(oid))
+        log.debug('oid: %s', oid)
         return oid
 
     def _realloc_ptrs(self, oid, count):
+        oid = _oid_as_tuple(oid)
         log.debug('realloc_ptrs: %r %r', oid, count)
         """As _realloc, but the new memory is enough for count pointers."""
         return self._realloc(oid, count * ffi.sizeof('PObjPtr'),
@@ -372,11 +378,13 @@ class PersistentObjectPool(object):
 
     def _free(self, oid):
         """Free the memory pointed to by oid."""
-        log.debug('free: %r', _oid_key(oid))
+        oid = _oid_as_tuple(oid)
+        log.debug('free: %r', oid)
         _check_errno(lib.pmemobj_tx_free(oid))
 
     def _direct(self, oid):
         """Return the real memory address where oid lives."""
+        oid = _oid_as_tuple(oid)
         return _check_null(lib.pmemobj_direct(oid))
 
     def _tx_add_range_direct(self, ptr, size):
@@ -393,7 +401,7 @@ class PersistentObjectPool(object):
         # XXX WeakValueDictionary?
         # XXX I'm not sure we can get away with mapping OID_NULL
         # to None here, but try it and see.
-        self._resurrect_cache = {_oid_key(OID_NULL): None}
+        self._resurrect_cache = {_oid_as_tuple(OID_NULL): None}
 
     def _get_type_code(self, cls):
         """Return the index into the type table for cls.
@@ -431,22 +439,20 @@ class PersistentObjectPool(object):
         if not hasattr(self, persister):
             raise TypeError("Don't know now to persist {!r}".format(cls_str))
         oid = getattr(self, persister)(obj)
-        # XXX This could be a problem, but hopefully it will just work.  In
-        # theory every PMEMoid stored here is one returned by a malloc call,
-        # and so is an unchanging canonical pointer to the memory.  And
-        # hopefully anywhere it gets assigned ends up copying the data.
+        # This oid should always come from a malloc, and thus be a tuple,
+        # and so the correct value to use as a key without calling _as_tuple.
         self._persist_cache[key] = oid
-        o_key = _oid_key(oid)
-        self._resurrect_cache[o_key] = obj
-        log.debug('new %s object: %r', cls_str, o_key)
+        self._resurrect_cache[oid] = obj
+        log.debug('new %s object: %r', cls_str, oid)
         return oid
 
     def _resurrect(self, oid):
         """Return python object representing the data stored at oid."""
+        oid = _oid_as_tuple(oid)
         # XXX need multiple debug levels
-        #log.debug('resurrect: %r', _oid_key(oid))
+        #log.debug('resurrect: %r', oid)
         try:
-            obj = self._resurrect_cache[_oid_key(oid)]
+            obj = self._resurrect_cache[oid]
             #log.debug('resurrected from cache: %r', obj)
             return obj
         except KeyError:
@@ -456,8 +462,8 @@ class PersistentObjectPool(object):
         # The special cases are to avoid infinite regress in the type table.
         if type_code == 0:
             res = PersistentList(__manager__=self, _oid=oid)
-            self._resurrect_cache[_oid_key(oid)] = res
-            log.debug('resurrect PersistentList: %s %r', _oid_key(oid), res)
+            self._resurrect_cache[oid] = res
+            log.debug('resurrect PersistentList: %s %r', oid, res)
             return res
         if type_code == 1:
             cls_str = 'builtins:str'
@@ -469,13 +475,13 @@ class PersistentObjectPool(object):
             cls = find_class_from_string(cls_str)
             res = cls(__manager__=self, _oid=oid)
             log.debug('resurrect %r: persistent type (%r): %r',
-                      _oid_key(oid), cls_str, res)
+                      oid, cls_str, res)
             return res
         res = getattr(self, resurrector)(obj_ptr)
-        self._resurrect_cache[_oid_key(oid)] = res
+        self._resurrect_cache[oid] = res
         self._persist_cache[res] = oid
         log.debug('resurrect %r: immutable type (%r): %r',
-                  _oid_key(oid), resurrector, res)
+                  oid, resurrector, res)
         return res
 
     def _persist_builtins_str(self, s):
@@ -532,7 +538,8 @@ class PersistentObjectPool(object):
 
     def _incref(self, oid):
         """Increment the reference count of oid."""
-        log.debug('incref %r', _oid_key(oid))
+        oid = _oid_as_tuple(oid)
+        log.debug('incref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
         with self:
             self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
@@ -540,7 +547,8 @@ class PersistentObjectPool(object):
 
     def _decref(self, oid):
         """Decrement the reference count of oid, and free it if zero."""
-        log.debug('decref %r', _oid_key(oid))
+        oid = _oid_as_tuple(oid)
+        log.debug('decref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
         with self:
             # XXX also need to remove oid from resurrect and persist caches
@@ -557,7 +565,7 @@ class PersistentObjectPool(object):
 
     def _deallocate(self, oid):
         """Deallocate the memory occupied by oid."""
-        log.debug("deallocating %s", _oid_key(oid))
+        log.debug("deallocating %s", oid)
         with self:
             # XXX could have a type cache so we don't have to resurrect here.
             obj = self._resurrect(oid)
@@ -586,7 +594,6 @@ class PersistentObjectPool(object):
         containers = set()
         other = set()
         orphans = set()
-        oid_map = {}
         types = {}
         type_counts = collections.defaultdict(int)
         gc_counts = collections.defaultdict(int)
@@ -594,8 +601,7 @@ class PersistentObjectPool(object):
         # Catalog all PObjects.
         oid = lib.pmemobj_first(self._pool_ptr)
         while not _oids_eq(OID_NULL, oid):
-            o_key = _oid_key(oid)
-            oid_map[o_key] = oid
+            oid = _oid_as_tuple(oid)
             type_num = lib.pmemobj_type_num(oid)
             # XXX Could make the _PTR lists PObjects too so they are tracked.
             if type_num == POBJECT_TYPE_NUM:
@@ -603,8 +609,8 @@ class PersistentObjectPool(object):
                 if debug:
                     if obj.ob_refcnt < 0:
                         log.error("Negative refcount (%s): %s %r",
-                                  obj.ob_refcnt, o_key, self._resurrect(oid))
-                assert obj.ob_refcnt >= 0, '%s has negative refcnt' % o_key
+                                  obj.ob_refcnt, oid, self._resurrect(oid))
+                assert obj.ob_refcnt >= 0, '%s has negative refcnt' % oid
                 # XXX move this cache to the POP?
                 type_code = obj.ob_type
                 if type_code not in types:
@@ -615,18 +621,18 @@ class PersistentObjectPool(object):
                 if not obj.ob_refcnt:
                     if debug:
                         log.debug('gc: orphan: %s %s %r',
-                                  o_key, obj.ob_refcnt, self._resurrect(oid))
-                    orphans.add(o_key)
+                                  oid, obj.ob_refcnt, self._resurrect(oid))
+                    orphans.add(oid)
                 elif hasattr(typ, '_traverse'):
                     if debug:
                         log.debug('gc: container: %s %s %r',
-                                  o_key, obj.ob_refcnt, self._resurrect(oid))
-                    containers.add(o_key)
+                                  oid, obj.ob_refcnt, self._resurrect(oid))
+                    containers.add(oid)
                 else:
                     if debug:
                         log.debug('gc: other: %s %s %r',
-                                  o_key, obj.ob_refcnt, self._resurrect(oid))
-                    other.add(o_key)
+                                  oid, obj.ob_refcnt, self._resurrect(oid))
+                    other.add(oid)
             oid = lib.pmemobj_next(oid)
         gc_counts['containers-total'] = len(containers)
         gc_counts['other-total'] = len(other)
@@ -634,33 +640,30 @@ class PersistentObjectPool(object):
         # Clean up refcount 0 orphans (from a crash or code bug).
         log.debug("gc: deallocating %s orphans", len(orphans))
         gc_counts['orphans0-gced'] = len(orphans)
-        for o_key in orphans:
+        for oid in orphans:
             if debug:
                 # XXX This should be a non debug warning on close.
                 log.warning("deallocating orphan (refcount 0): %s %r",
-                            o_key, self._resurrect(oid))
-            self._deallocate(oid_map[o_key])
+                            oid, self._resurrect(oid))
+            self._deallocate(oid)
 
         # Trace the object tree, removing objects that are referenced.
-        tt_key = _oid_key(self._type_table._oid)
-        containers.remove(tt_key)
-        live = [tt_key]
+        containers.remove(self._type_table._oid)
+        live = [self._type_table._oid]
         if hasattr(self.root, '_traverse'):
-            r_key = _oid_key(self.root._oid)
-            containers.remove(r_key)
-            live.append(r_key)
+            containers.remove(self.root._oid)
+            live.append(self.root._oid)
         elif self.root is not None:
-            o_key = _oid_key(self._pmem_root.root_object)
+            oid = _oid_as_tuple(self._pmem_root.root_object)
             if debug:
-                log.debug('gc: non-container root: %s %r', o_key, self.root)
-            other.remove(o_key)
-        for o_key in live:
-            oid = oid_map[o_key]
+                log.debug('gc: non-container root: %s %r', oid, self.root)
+            other.remove(oid)
+        for oid in live:
             if debug:
                 log.debug('gc: checking live %s %r',
-                          o_key, self._resurrect(oid))
+                          oid, self._resurrect(oid))
             for sub_oid in self._resurrect(oid)._traverse():
-                sub_key = _oid_key(sub_oid)
+                sub_key = _oid_as_tuple(sub_oid)
                 if sub_key in containers:
                     if debug:
                         log.debug('gc: refed container %s %r',
@@ -677,22 +680,21 @@ class PersistentObjectPool(object):
 
         # Everything left is unreferenced via the root, deallocate it.
         log.debug('gc: deallocating %s containers', len(containers))
-        for o_key in containers:
+        for oid in containers:
             if debug:
-                oid = oid_map[o_key]
                 obj = self._resurrect(oid)
-                log.debug('gc: deallocating container %s %r', o_key, obj)
+                log.debug('gc: deallocating container %s %r', oid, obj)
                 for sub_oid in obj:
                     # XXX this is wrong, could multi-count if multiple refs.
                     # XXX and what if the sub_oid is in containers with ref 0?
                     gc_counts['other-gced'] += 1
-            self._deallocate(oid_map[o_key])
+            self._deallocate(oid)
         log.debug('gc: deallocating %s new orphans', len(other))
         gc_counts['orphans1-gced'] = len(other)
-        for o_key in other:
+        for oid in other:
             log.warning("Orphaned with postive refcount: %s: %s",
-                o_key, self._resurrect(oid))
-            self._deallocate(oid_map[o_key])
+                oid, self._resurrect(oid))
+            self._deallocate(oid)
         log.debug('gc: end')
 
         return dict(type_counts), dict(gc_counts)
@@ -755,7 +757,7 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
         lib.pmemobj_tx_add_range_direct(pmem_root, ffi.sizeof('PRoot'))
         pmem_root.type_table = type_table._oid
         pop._incref(type_table._oid)
-        pop._resurrect_cache[_oid_key(type_table._oid)] = type_table
+        pop._resurrect_cache[type_table._oid] = type_table
         pop._pmem_root = pmem_root
     pop._type_table = type_table
     return pop
@@ -936,12 +938,12 @@ class PersistentList(abc.MutableSequence):
         items = self._items
         with mm:
             for i in range(self._size):
-                oid = items[i]
-                o_key = _oid_key(oid)
+                # Grab oid in tuple form so the assignment can't change it
+                oid = _oid_as_tuple(items[i])
                 if _oids_eq(OID_NULL, oid):
                     continue
                 items[i] = OID_NULL
-                mm._decref(o_key)
+                mm._decref(oid)
             self._resize(0)
 
     # Additional methods required by the pmemobj API.
