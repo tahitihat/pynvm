@@ -1,21 +1,4 @@
-"""
-.. module:: pmemobj
-.. moduleauthor:: R. David Murray <rdmurray@bitdance.com>
-
-:mod:`pmemobj` -- pmem-resident objects
-=========================================================
-
-"""
-
-# XXX Time to break this up into a package.
-
 import collections
-try:
-    import collections.abc as abc
-except ImportError:
-    import collections as abc
-    import faulthandler
-    faulthandler.enable()
 import errno
 if not hasattr(errno, 'ECANCELED'):
     errno.ECANCELED = 125  # 2.7 errno doesn't define this, so guess.
@@ -24,29 +7,9 @@ import os
 import sys
 from pickle import whichmodule
 from threading import RLock
+
 from _pmem import lib, ffi
-
-try:
-    from reprlib import recursive_repr
-except ImportError:
-    from thread import get_ident
-    def recursive_repr(fillvalue='...'):
-        'Decorator to make a repr function return fillvalue for a recursive call'
-        def decorating_function(user_function):
-            repr_running = set()
-            def wrapper(self):
-                key = id(self), get_ident()
-                if key in repr_running:
-                    return fillvalue
-                repr_running.add(key)
-                try:
-                    result = user_function(self)
-                finally:
-                    repr_running.discard(key)
-                return result
-            return wrapper
-        return decorating_function
-
+from .list import PersistentList
 
 log = logging.getLogger('pynvm.pmemobj')
 
@@ -61,6 +24,7 @@ OID_NULL = lib.OID_NULL
 # Arbitrary numbers.
 POBJECT_TYPE_NUM = 20
 POBJPTR_ARRAY_TYPE_NUM = 21
+
 
 # In general an oid is going to already be in tuple form, since that's what the
 # memory management routines return.  But sometimes we get an PMEMoid from a
@@ -77,6 +41,7 @@ def _oid_as_tuple(oid):
 def _oids_eq(oid1, oid2):
     """Return True if the two oids hold the same data."""
     return _oid_as_tuple(oid1) == _oid_as_tuple(oid2)
+
 
 # XXX move this to a central location and use in all libraries.
 def _coerce_fn(file_name):
@@ -714,6 +679,12 @@ class PersistentObjectPool(object):
         log.debug('new: %s, %s, %s', typ, args, kw)
         return typ(*args, __manager__=self, **kw)
 
+    # XXX temporary
+    def _oid_as_tuple(self, oid):
+        return _oid_as_tuple(oid)
+    def _oids_eq(self, *args):
+        return _oids_eq(*args)
+
 
 #
 # Pool access
@@ -772,197 +743,3 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
         pop._pmem_root = pmem_root
     pop._type_table = type_table
     return pop
-
-
-#
-# Persistent Classes
-#
-
-
-class PersistentList(abc.MutableSequence):
-    """Persistent version of the 'list' type."""
-
-    # XXX locking!
-    # XXX tp_del method (see _decref)
-    # XXX All bookkeeping attrs should be _v_xxxx so that all other attrs
-    #     (other than __manager__) can be made persistent.
-
-    def __init__(self, *args, **kw):
-        if '__manager__' not in kw:
-            raise ValueError("__manager__ is required")
-        mm = self.__manager__ = kw.pop('__manager__')
-        if '_oid' not in kw:
-            with mm:
-                # XXX Will want to implement a freelist here, like CPython
-                self._oid = mm._malloc(ffi.sizeof('PListObject'))
-                ob = ffi.cast('PObject *', mm._direct(self._oid))
-                ob.ob_type = mm._get_type_code(PersistentList)
-        else:
-            self._oid = kw.pop('_oid')
-        if kw:
-            raise TypeError("Unrecognized keyword argument(s) {}".format(kw))
-        self._body = ffi.cast('PListObject *', mm._direct(self._oid))
-        if args:
-            if len(args) != 1:
-                raise TypeError("PersistentList takes at most 1"
-                                " argument, {} given".format(len(args)))
-            self.extend(args[0])
-
-    # Methods and properties needed to implement the ABC required methods.
-
-    @property
-    def _size(self):
-        return ffi.cast('PVarObject *', self._body).ob_size
-
-    @property
-    def _allocated(self):
-        return self._body.allocated
-
-    @property
-    def _items(self):
-        ob_items = self._body.ob_items
-        if _oids_eq(OID_NULL, ob_items):
-            return None
-        return ffi.cast('PObjPtr *',
-                        self.__manager__._direct(ob_items))
-
-    def _resize(self, newsize):
-        mm = self.__manager__
-        allocated = self._allocated
-        # Only realloc if we don't have enough space already.
-        if (allocated >= newsize and newsize >= allocated >> 1):
-            assert self._items != None or newsize == 0
-            with mm:
-                mm._tx_add_range_direct(self._body, ffi.sizeof('PVarObject'))
-                ffi.cast('PVarObject *', self._body).ob_size = newsize
-            return
-        # We use CPython's overallocation algorithm.
-        new_allocated = (newsize >> 3) + (3 if newsize < 9 else 6) + newsize
-        if newsize == 0:
-            new_allocated = 0
-        items = self._items
-        with mm:
-            if items is None:
-                items = mm._malloc_ptrs(new_allocated)
-            else:
-                items = mm._realloc_ptrs(self._body.ob_items, new_allocated)
-            mm._tx_add_range_direct(self._body, ffi.sizeof('PListObject'))
-            self._body.ob_items = items
-            self._body.allocated = new_allocated
-            ffi.cast('PVarObject *', self._body).ob_size = newsize
-
-    def insert(self, index, value):
-        mm = self.__manager__
-        with mm:
-            size = self._size
-            newsize = size + 1
-            self._resize(newsize)
-            if index < 0:
-                index += size
-                if index < 0:
-                    index = 0
-            if index > size:
-                index = size
-            items = self._items
-            mm._tx_add_range_direct(items + index,
-                                    ffi.offsetof('PObjPtr *', newsize))
-            for i in range(size, index, -1):
-                items[i] = items[i-1]
-            v_oid = mm._persist(value)
-            mm._incref(v_oid)
-            items[index] = v_oid
-
-    def _normalize_index(self, index):
-        try:
-            index = int(index)
-        except TypeError:
-            # Assume it is a slice
-            # XXX fixme
-            raise NotImplementedError("Slicing not yet implemented")
-        if index < 0:
-            index += self._size
-        if index < 0 or index >= self._size:
-            raise IndexError(index)
-        return index
-
-    def __setitem__(self, index, value):
-        index = self._normalize_index(index)
-        mm = self.__manager__
-        items = self._items
-        with mm:
-            v_oid = mm._persist(value)
-            mm._tx_add_range_direct(ffi.addressof(items, index),
-                                    ffi.sizeof('PObjPtr *'))
-            mm._xdecref(items[index])
-            items[index] = v_oid
-            mm._incref(v_oid)
-
-    def __delitem__(self, index):
-        index = self._normalize_index(index)
-        mm = self.__manager__
-        size = self._size
-        newsize = size - 1
-        items = self._items
-        with mm:
-            mm._tx_add_range_direct(ffi.addressof(items, index),
-                                    ffi.offsetof('PObjPtr *', size))
-            mm._decref(items[index])
-            for i in range(index, newsize):
-                items[i] = items[i+1]
-            self._resize(newsize)
-
-    def __getitem__(self, index):
-        index = self._normalize_index(index)
-        items = self._items
-        return self.__manager__._resurrect(items[index])
-
-    def __len__(self):
-        return self._size
-
-    # Additional list methods not provided by the ABC.
-
-    @recursive_repr()
-    def __repr__(self):
-        return "{}([{}])".format(self.__class__.__name__,
-                                 ', '.join("{!r}".format(x) for x in self))
-
-    def __eq__(self, other):
-        try:
-            ol = len(other)
-        except AttributeError:
-            return NotImplemented
-        if len(self) != ol:
-            return False
-        for i in range(len(self)):
-            try:
-                ov = other[i]
-            except (AttributeError, IndexError):
-                return NotImplemented
-            if self[i] != ov:
-                return False
-        return True
-
-    def clear(self):
-        if self._size == 0:
-            return
-        mm = self.__manager__
-        items = self._items
-        with mm:
-            for i in range(self._size):
-                # Grab oid in tuple form so the assignment can't change it
-                oid = _oid_as_tuple(items[i])
-                if _oids_eq(OID_NULL, oid):
-                    continue
-                items[i] = OID_NULL
-                mm._decref(oid)
-            self._resize(0)
-
-    # Additional methods required by the pmemobj API.
-
-    def _traverse(self):
-        items = self._items
-        for i in range(len(self)):
-            yield items[i]
-
-    def _deallocate(self):
-        self.clear()
