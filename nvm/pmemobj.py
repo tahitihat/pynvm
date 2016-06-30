@@ -207,6 +207,7 @@ class PersistentObjectPool(object):
         self._pool_ptr = pool_ptr
         self.filename = filename
         self.closed = False
+        self._track_free = None
         if create:
             self._type_table = None
             self._root = None
@@ -539,8 +540,8 @@ class PersistentObjectPool(object):
     def _incref(self, oid):
         """Increment the reference count of oid."""
         oid = _oid_as_tuple(oid)
-        log.debug('incref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
+        log.debug('incref %r %r', oid, p_obj.ob_refcnt + 1)
         with self:
             self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
             p_obj.ob_refcnt += 1
@@ -548,8 +549,8 @@ class PersistentObjectPool(object):
     def _decref(self, oid):
         """Decrement the reference count of oid, and free it if zero."""
         oid = _oid_as_tuple(oid)
-        log.debug('decref %r', oid)
         p_obj = ffi.cast('PObject *', self._direct(oid))
+        log.debug('decref %r %r', oid, p_obj.ob_refcnt - 1)
         with self:
             # XXX also need to remove oid from resurrect and persist caches
             self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
@@ -572,6 +573,8 @@ class PersistentObjectPool(object):
             if hasattr(obj, '_deallocate'):
                 obj._deallocate()
             self._free(oid)
+        if self._track_free is not None:
+            self._track_free.add(oid)
 
     # If I didn't have to support python2 I'd make debug keyword only.
     def gc(self, debug=False):
@@ -680,21 +683,29 @@ class PersistentObjectPool(object):
 
         # Everything left is unreferenced via the root, deallocate it.
         log.debug('gc: deallocating %s containers', len(containers))
+        self._track_free = set()
         for oid in containers:
+            if oid in self._track_free:
+                continue
             if debug:
-                obj = self._resurrect(oid)
-                log.debug('gc: deallocating container %s %r', oid, obj)
-                for sub_oid in obj:
-                    # XXX this is wrong, could multi-count if multiple refs.
-                    # XXX and what if the sub_oid is in containers with ref 0?
-                    gc_counts['other-gced'] += 1
-            self._deallocate(oid)
+                log.debug('gc: deallocating container %s %r',
+                          oid, self._resurrect(oid))
+            with self:
+                # incref so we don't try to deallocate us during cycle clear.
+                self._incref(oid)
+                self._deallocate(oid)
+                # deallocate frees oid, so no decref.
+        gc_counts['collections-gced'] = len(containers)
         log.debug('gc: deallocating %s new orphans', len(other))
-        gc_counts['orphans1-gced'] = len(other)
         for oid in other:
+            if oid in self._track_free:
+                continue
             log.warning("Orphaned with postive refcount: %s: %s",
                 oid, self._resurrect(oid))
             self._deallocate(oid)
+            gc_counts['orphans1-gced'] += 1
+        gc_counts['other-gced'] = len(other) - gc_counts['orphans1-gced']
+        self._track_free = None
         log.debug('gc: end')
 
         return dict(type_counts), dict(gc_counts)

@@ -179,6 +179,20 @@ class TestGC(TestCase):
         self.assertEqual(gc_counts['orphans0-gced'], 1)
         self.assertGCCollectedNothing(pop.gc()[1])
 
+    def test_collect_cycle(self):
+        pop = self._pop()
+        pop.root = pop.new(pmemobj.PersistentList)
+        pop.root.append(pop.new(pmemobj.PersistentList))
+        pop.root.append(pop.new(pmemobj.PersistentList))
+        pop.root[0].append(pop.root[1])
+        pop.root[1].append(pop.root[0])
+        type_counts, _ = pop.gc()
+        self.assertEqual(type_counts['PersistentList'], 4)
+        pop.root.clear()
+        type_counts, gc_counts = pop.gc(debug=True)
+        self.assertEqual(type_counts['PersistentList'], 4)
+        self.assertEqual(gc_counts['collections-gced'], 2)
+
 
 class TestPersistentList(TestCase):
 
