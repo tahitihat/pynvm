@@ -28,7 +28,7 @@ class TestCase(unittest.TestCase):
         return fn
 
 
-class Test(TestCase):
+class TestPersistentObjectPool(TestCase):
 
     def assertMsgBits(self, msg, *bits):
         for bit in bits:
