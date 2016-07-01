@@ -203,19 +203,19 @@ class PersistentObjectPool(object):
         between program runs *only* if it can be reached from the root object.
 
         """
-        return self.mm._resurrect(self.mm._pmem_root.root_object)
+        return self.mm.resurrect(self.mm._pmem_root.root_object)
 
     @root.setter
     def root(self, value):
         log.debug("setting 'root' to %r", value)
         with self, self.mm.lock:
-            oid = self.mm._persist(value)
+            oid = self.mm.persist(value)
             self.mm.protect_range(
                 ffi.addressof(self.mm._pmem_root.root_object),
                 ffi.sizeof('PObjPtr'))
-            self.mm._xdecref(self.mm._pmem_root.root_object)
+            self.mm.xdecref(self.mm._pmem_root.root_object)
             self.mm._pmem_root.root_object = oid
-            self.mm._incref(oid)
+            self.mm.incref(oid)
 
     def begin_transaction(self):
         """Start a new (sub)transaction."""
@@ -308,7 +308,7 @@ class MemoryManager(object):
                 raise RuntimeError("Pool {} not initialized completely".format(
                     self.filename))
             self._pmem_root = pmem_root
-            self._type_table = self._resurrect(pmem_root.type_table)
+            self._type_table = self.resurrect(pmem_root.type_table)
             # Make sure any objects orphaned by a crash are cleaned up.
             # XXX should fix this to only be called when there is a crash.
             self.gc()
@@ -462,7 +462,7 @@ class MemoryManager(object):
             log.debug('new type_code for %s: %r', cls_str, code)
             return code
 
-    def _persist(self, obj):
+    def persist(self, obj):
         """Store obj in persistent memory and return its oid."""
         key = obj if getattr(obj, '__hash__', None) else id(obj)
         log.debug('persist: %r (key %r)', obj, key)
@@ -484,7 +484,7 @@ class MemoryManager(object):
         log.debug('new %s object: %r', cls_str, oid)
         return oid
 
-    def _resurrect(self, oid):
+    def resurrect(self, oid):
         """Return python object representing the data stored at oid."""
         oid = _oid_as_tuple(oid)
         # XXX need multiple debug levels
@@ -574,7 +574,7 @@ class MemoryManager(object):
         i_str = self._resurrect_builtins_str(obj_ptr)
         return int(i_str)
 
-    def _incref(self, oid):
+    def incref(self, oid):
         """Increment the reference count of oid."""
         oid = _oid_as_tuple(oid)
         p_obj = ffi.cast('PObject *', self.direct(oid))
@@ -583,7 +583,7 @@ class MemoryManager(object):
             self.protect_range(p_obj, ffi.sizeof('PObject'))
             p_obj.ob_refcnt += 1
 
-    def _decref(self, oid):
+    def decref(self, oid):
         """Decrement the reference count of oid, and free it if zero."""
         oid = _oid_as_tuple(oid)
         p_obj = ffi.cast('PObject *', self.direct(oid))
@@ -596,17 +596,17 @@ class MemoryManager(object):
             if p_obj.ob_refcnt < 1:
                 self._deallocate(oid)
 
-    def _xdecref(self, oid):
+    def xdecref(self, oid):
         """decref oid if it is not OID_NULL."""
         if not _oids_eq(OID_NULL, oid):
-            self._decref(oid)
+            self.decref(oid)
 
     def _deallocate(self, oid):
         """Deallocate the memory occupied by oid."""
         log.debug("deallocating %s", oid)
         with self:
             # XXX could have a type cache so we don't have to resurrect here.
-            obj = self._resurrect(oid)
+            obj = self.resurrect(oid)
             if hasattr(obj, '_deallocate'):
                 obj._deallocate()
             self.free(oid)
@@ -649,7 +649,7 @@ class MemoryManager(object):
                 if debug:
                     if obj.ob_refcnt < 0:
                         log.error("Negative refcount (%s): %s %r",
-                                  obj.ob_refcnt, oid, self._resurrect(oid))
+                                  obj.ob_refcnt, oid, self.resurrect(oid))
                 assert obj.ob_refcnt >= 0, '%s has negative refcnt' % oid
                 # XXX move this cache to the POP?
                 type_code = obj.ob_type
@@ -661,17 +661,17 @@ class MemoryManager(object):
                 if not obj.ob_refcnt:
                     if debug:
                         log.debug('gc: orphan: %s %s %r',
-                                  oid, obj.ob_refcnt, self._resurrect(oid))
+                                  oid, obj.ob_refcnt, self.resurrect(oid))
                     orphans.add(oid)
                 elif hasattr(typ, '_traverse'):
                     if debug:
                         log.debug('gc: container: %s %s %r',
-                                  oid, obj.ob_refcnt, self._resurrect(oid))
+                                  oid, obj.ob_refcnt, self.resurrect(oid))
                     containers.add(oid)
                 else:
                     if debug:
                         log.debug('gc: other: %s %s %r',
-                                  oid, obj.ob_refcnt, self._resurrect(oid))
+                                  oid, obj.ob_refcnt, self.resurrect(oid))
                     other.add(oid)
             oid = lib.pmemobj_next(oid)
         gc_counts['containers-total'] = len(containers)
@@ -684,14 +684,14 @@ class MemoryManager(object):
             if debug:
                 # XXX This should be a non debug warning on close.
                 log.warning("deallocating orphan (refcount 0): %s %r",
-                            oid, self._resurrect(oid))
+                            oid, self.resurrect(oid))
             self._deallocate(oid)
 
         # Trace the object tree, removing objects that are referenced.
         containers.remove(self._type_table._oid)
         live = [self._type_table._oid]
         root_oid = _oid_as_tuple(self._pmem_root.root_object)
-        root = self._resurrect(root_oid)
+        root = self.resurrect(root_oid)
         if hasattr(root, '_traverse'):
             containers.remove(root_oid)
             live.append(root_oid)
@@ -702,19 +702,19 @@ class MemoryManager(object):
         for oid in live:
             if debug:
                 log.debug('gc: checking live %s %r',
-                          oid, self._resurrect(oid))
-            for sub_oid in self._resurrect(oid)._traverse():
+                          oid, self.resurrect(oid))
+            for sub_oid in self.resurrect(oid)._traverse():
                 sub_key = _oid_as_tuple(sub_oid)
                 if sub_key in containers:
                     if debug:
                         log.debug('gc: refed container %s %r',
-                                   sub_key, self_resurrect(sub_oid))
+                                   sub_key, self.resurrect(sub_oid))
                     containers.remove(sub_key)
                     live.append(sub_key)
                 elif sub_key in other:
                     if debug:
                         log.debug('gc: refed oid %s %r',
-                                  sub_key, self._resurrect(sub_oid))
+                                  sub_key, self.resurrect(sub_oid))
                     other.remove(sub_key)
                     gc_counts['other-live'] += 1
         gc_counts['containers-live'] = len(live)
@@ -727,10 +727,10 @@ class MemoryManager(object):
                 continue
             if debug:
                 log.debug('gc: deallocating container %s %r',
-                          oid, self._resurrect(oid))
+                          oid, self.resurrect(oid))
             with self:
                 # incref so we don't try to deallocate us during cycle clear.
-                self._incref(oid)
+                self.incref(oid)
                 self._deallocate(oid)
                 # deallocate frees oid, so no decref.
         gc_counts['collections-gced'] = len(containers)
@@ -739,7 +739,7 @@ class MemoryManager(object):
             if oid in self._track_free:
                 continue
             log.warning("Orphaned with postive refcount: %s: %s",
-                oid, self._resurrect(oid))
+                oid, self.resurrect(oid))
             self._deallocate(oid)
             gc_counts['orphans1-gced'] += 1
         gc_counts['other-gced'] = len(other) - gc_counts['orphans1-gced']
@@ -807,7 +807,7 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
             __manager__=pop.mm)
         pop.mm.protect_range(pmem_root, ffi.sizeof('PRoot'))
         pmem_root.type_table = type_table._oid
-        pop.mm._incref(type_table._oid)
+        pop.mm.incref(type_table._oid)
         pop.mm._resurrect_cache[type_table._oid] = type_table
         pop.mm._pmem_root = pmem_root
     pop.mm._type_table = type_table

@@ -9,7 +9,7 @@ class PersistentList(abc.MutableSequence):
     """Persistent version of the 'list' type."""
 
     # XXX locking!
-    # XXX tp_del method (see _decref)
+    # XXX tp_del method (see decref)
     # XXX All bookkeeping attrs should be _v_xxxx so that all other attrs
     #     (other than __manager__) can be made persistent.
 
@@ -94,8 +94,8 @@ class PersistentList(abc.MutableSequence):
                                     ffi.offsetof('PObjPtr *', newsize))
             for i in range(size, index, -1):
                 items[i] = items[i-1]
-            v_oid = mm._persist(value)
-            mm._incref(v_oid)
+            v_oid = mm.persist(value)
+            mm.incref(v_oid)
             items[index] = v_oid
 
     def _normalize_index(self, index):
@@ -116,12 +116,12 @@ class PersistentList(abc.MutableSequence):
         mm = self.__manager__
         items = self._items
         with mm:
-            v_oid = mm._persist(value)
+            v_oid = mm.persist(value)
             mm.protect_range(ffi.addressof(items, index),
                                     ffi.sizeof('PObjPtr *'))
-            mm._xdecref(items[index])
+            mm.xdecref(items[index])
             items[index] = v_oid
-            mm._incref(v_oid)
+            mm.incref(v_oid)
 
     def __delitem__(self, index):
         index = self._normalize_index(index)
@@ -132,7 +132,7 @@ class PersistentList(abc.MutableSequence):
         with mm:
             mm.protect_range(ffi.addressof(items, index),
                                     ffi.offsetof('PObjPtr *', size))
-            mm._decref(items[index])
+            mm.decref(items[index])
             for i in range(index, newsize):
                 items[i] = items[i+1]
             self._resize(newsize)
@@ -140,7 +140,7 @@ class PersistentList(abc.MutableSequence):
     def __getitem__(self, index):
         index = self._normalize_index(index)
         items = self._items
-        return self.__manager__._resurrect(items[index])
+        return self.__manager__.resurrect(items[index])
 
     def __len__(self):
         return self._size
@@ -180,7 +180,7 @@ class PersistentList(abc.MutableSequence):
                 if mm._oids_eq(lib.OID_NULL, oid):
                     continue
                 items[i] = lib.OID_NULL
-                mm._decref(oid)
+                mm.decref(oid)
             self._resize(0)
 
     # Additional methods required by the pmemobj API.
