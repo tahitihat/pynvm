@@ -210,7 +210,7 @@ class PersistentObjectPool(object):
         log.debug("setting 'root' to %r", value)
         with self, self.mm.lock:
             oid = self.mm._persist(value)
-            self.mm._tx_add_range_direct(
+            self.mm.protect_range(
                 ffi.addressof(self.mm._pmem_root.root_object),
                 ffi.sizeof('PObjPtr'))
             self.mm._xdecref(self.mm._pmem_root.root_object)
@@ -301,7 +301,7 @@ class MemoryManager(object):
             self._init_caches()
             size = lib.pmemobj_root_size(self._pool_ptr)
             if size:
-                pmem_root = self._direct(lib.pmemobj_root(self._pool_ptr, 0))
+                pmem_root = self.direct(lib.pmemobj_root(self._pool_ptr, 0))
                 pmem_root = ffi.cast('PRoot *', pmem_root)
             # I'm not sure the check for pmem_root not NULL is needed.
             if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
@@ -369,7 +369,7 @@ class MemoryManager(object):
     # transaction executing in a given thread at a time.  XXX should add a
     # check for this, probably in __enter__.
 
-    def _malloc(self, size, type_num=POBJECT_TYPE_NUM):
+    def malloc(self, size, type_num=POBJECT_TYPE_NUM):
         """Return a pointer to size bytes of newly allocated persistent memory.
 
         By default the pmemobject type number is POBJECT_TYPE_NUM; be careful
@@ -382,16 +382,16 @@ class MemoryManager(object):
         log.debug('oid: %s', oid)
         return oid
 
-    def _malloc_ptrs(self, count):
+    def malloc_ptrs(self, count):
         """Return pointer to enough persistent memory for count pointers.
 
         The pmem type number is set to POBJPTR_ARRAY_TYPE_NUM.
         """
         log.debug('malloc_ptrs: %r', count)
-        return self._malloc(count * ffi.sizeof('PObjPtr'),
+        return self.malloc(count * ffi.sizeof('PObjPtr'),
                             type_num=POBJPTR_ARRAY_TYPE_NUM)
 
-    def _realloc(self, oid, size, type_num=None):
+    def realloc(self, oid, size, type_num=None):
         """Copy oid contents into size bytes of new persistent memory.
 
         Return pointer to the new memory.
@@ -399,7 +399,7 @@ class MemoryManager(object):
         oid = _oid_as_tuple(oid)
         log.debug('realloc: %r %r', oid, size)
         if size == 0:
-            self._free(oid)
+            self.free(oid)
             return OID_NULL
         if type_num is None:
             type_num = lib.pmemobj_type_num(oid)
@@ -407,25 +407,25 @@ class MemoryManager(object):
         log.debug('oid: %s', oid)
         return oid
 
-    def _realloc_ptrs(self, oid, count):
+    def realloc_ptrs(self, oid, count):
         oid = _oid_as_tuple(oid)
         log.debug('realloc_ptrs: %r %r', oid, count)
-        """As _realloc, but the new memory is enough for count pointers."""
-        return self._realloc(oid, count * ffi.sizeof('PObjPtr'),
+        """As realloc, but the new memory is enough for count pointers."""
+        return self.realloc(oid, count * ffi.sizeof('PObjPtr'),
                              POBJPTR_ARRAY_TYPE_NUM)
 
-    def _free(self, oid):
+    def free(self, oid):
         """Free the memory pointed to by oid."""
         oid = _oid_as_tuple(oid)
         log.debug('free: %r', oid)
         _check_errno(lib.pmemobj_tx_free(oid))
 
-    def _direct(self, oid):
+    def direct(self, oid):
         """Return the real memory address where oid lives."""
         oid = _oid_as_tuple(oid)
         return _check_null(lib.pmemobj_direct(oid))
 
-    def _tx_add_range_direct(self, ptr, size):
+    def protect_range(self, ptr, size):
         lib.pmemobj_tx_add_range_direct(ptr, size)
 
     #
@@ -495,7 +495,7 @@ class MemoryManager(object):
             return obj
         except KeyError:
             pass
-        obj_ptr = ffi.cast('PObject *', self._direct(oid))
+        obj_ptr = ffi.cast('PObject *', self.direct(oid))
         type_code = obj_ptr.ob_type
         # The special cases are to avoid infinite regress in the type table.
         if type_code == 0:
@@ -527,8 +527,8 @@ class MemoryManager(object):
         if sys.version_info[0] > 2:
             s = s.encode('utf-8')
         with self:
-            p_str_oid = self._malloc(ffi.sizeof('PObject') + len(s) + 1)
-            p_str = ffi.cast('PObject *', self._direct(p_str_oid))
+            p_str_oid = self.malloc(ffi.sizeof('PObject') + len(s) + 1)
+            p_str = ffi.cast('PObject *', self.direct(p_str_oid))
             p_str.ob_type = type_code
             body = ffi.cast('char *', p_str) + ffi.sizeof('PObject')
             ffi.buffer(body, len(s))[:] = s
@@ -544,8 +544,8 @@ class MemoryManager(object):
     def _persist_builtins_float(self, f):
         type_code = self._get_type_code(f.__class__)
         with self:
-            p_float_oid = self._malloc(ffi.sizeof('PFloatObject'))
-            p_float = ffi.cast('PObject *', self._direct(p_float_oid))
+            p_float_oid = self.malloc(ffi.sizeof('PFloatObject'))
+            p_float = ffi.cast('PObject *', self.direct(p_float_oid))
             p_float.ob_type = type_code
             p_float = ffi.cast('PFloatObject *', p_float)
             p_float.fval = f
@@ -565,7 +565,7 @@ class MemoryManager(object):
         with self:
             # There's a bit of extra overhead in reusing this, but not much.
             p_int_oid = self._persist_builtins_str(i)
-            p_int = ffi.cast('PObject *', self._direct(p_int_oid))
+            p_int = ffi.cast('PObject *', self.direct(p_int_oid))
             p_int.ob_type = type_code
         return p_int_oid
     _persist_builtins_long = _persist_builtins_int
@@ -577,20 +577,20 @@ class MemoryManager(object):
     def _incref(self, oid):
         """Increment the reference count of oid."""
         oid = _oid_as_tuple(oid)
-        p_obj = ffi.cast('PObject *', self._direct(oid))
+        p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('incref %r %r', oid, p_obj.ob_refcnt + 1)
         with self:
-            self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
+            self.protect_range(p_obj, ffi.sizeof('PObject'))
             p_obj.ob_refcnt += 1
 
     def _decref(self, oid):
         """Decrement the reference count of oid, and free it if zero."""
         oid = _oid_as_tuple(oid)
-        p_obj = ffi.cast('PObject *', self._direct(oid))
+        p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('decref %r %r', oid, p_obj.ob_refcnt - 1)
         with self:
             # XXX also need to remove oid from resurrect and persist caches
-            self._tx_add_range_direct(p_obj, ffi.sizeof('PObject'))
+            self.protect_range(p_obj, ffi.sizeof('PObject'))
             assert p_obj.ob_refcnt > 0
             p_obj.ob_refcnt -= 1
             if p_obj.ob_refcnt < 1:
@@ -609,7 +609,7 @@ class MemoryManager(object):
             obj = self._resurrect(oid)
             if hasattr(obj, '_deallocate'):
                 obj._deallocate()
-            self._free(oid)
+            self.free(oid)
         if self._track_free is not None:
             self._track_free.add(oid)
 
@@ -645,7 +645,7 @@ class MemoryManager(object):
             type_num = lib.pmemobj_type_num(oid)
             # XXX Could make the _PTR lists PObjects too so they are tracked.
             if type_num == POBJECT_TYPE_NUM:
-                obj =  ffi.cast('PObject *', self._direct(oid))
+                obj =  ffi.cast('PObject *', self.direct(oid))
                 if debug:
                     if obj.ob_refcnt < 0:
                         log.error("Negative refcount (%s): %s %r",
@@ -799,13 +799,13 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
                                         pool_size, mode))
     pop = PersistentObjectPool(ret, filename, create=True)
     pmem_root = lib.pmemobj_root(pop.mm._pool_ptr, ffi.sizeof('PRoot'))
-    pmem_root = ffi.cast('PRoot *', pop.mm._direct(pmem_root))
+    pmem_root = ffi.cast('PRoot *', pop.mm.direct(pmem_root))
     with pop:
         # Dummy first two elements; they are handled as special cases.
         type_table = PersistentList(
             [_class_string(PersistentList), _class_string(str)],
             __manager__=pop.mm)
-        lib.pmemobj_tx_add_range_direct(pmem_root, ffi.sizeof('PRoot'))
+        pop.mm.protect_range(pmem_root, ffi.sizeof('PRoot'))
         pmem_root.type_table = type_table._oid
         pop.mm._incref(type_table._oid)
         pop.mm._resurrect_cache[type_table._oid] = type_table

@@ -20,14 +20,14 @@ class PersistentList(abc.MutableSequence):
         if '_oid' not in kw:
             with mm:
                 # XXX Will want to implement a freelist here, like CPython
-                self._oid = mm._malloc(ffi.sizeof('PListObject'))
-                ob = ffi.cast('PObject *', mm._direct(self._oid))
+                self._oid = mm.malloc(ffi.sizeof('PListObject'))
+                ob = ffi.cast('PObject *', mm.direct(self._oid))
                 ob.ob_type = mm._get_type_code(PersistentList)
         else:
             self._oid = kw.pop('_oid')
         if kw:
             raise TypeError("Unrecognized keyword argument(s) {}".format(kw))
-        self._body = ffi.cast('PListObject *', mm._direct(self._oid))
+        self._body = ffi.cast('PListObject *', mm.direct(self._oid))
         if args:
             if len(args) != 1:
                 raise TypeError("PersistentList takes at most 1"
@@ -50,7 +50,7 @@ class PersistentList(abc.MutableSequence):
         if self.__manager__._oids_eq(lib.OID_NULL, ob_items):
             return None
         return ffi.cast('PObjPtr *',
-                        self.__manager__._direct(ob_items))
+                        self.__manager__.direct(ob_items))
 
     def _resize(self, newsize):
         mm = self.__manager__
@@ -59,7 +59,7 @@ class PersistentList(abc.MutableSequence):
         if (allocated >= newsize and newsize >= allocated >> 1):
             assert self._items != None or newsize == 0
             with mm:
-                mm._tx_add_range_direct(self._body, ffi.sizeof('PVarObject'))
+                mm.protect_range(self._body, ffi.sizeof('PVarObject'))
                 ffi.cast('PVarObject *', self._body).ob_size = newsize
             return
         # We use CPython's overallocation algorithm.
@@ -69,10 +69,10 @@ class PersistentList(abc.MutableSequence):
         items = self._items
         with mm:
             if items is None:
-                items = mm._malloc_ptrs(new_allocated)
+                items = mm.malloc_ptrs(new_allocated)
             else:
-                items = mm._realloc_ptrs(self._body.ob_items, new_allocated)
-            mm._tx_add_range_direct(self._body, ffi.sizeof('PListObject'))
+                items = mm.realloc_ptrs(self._body.ob_items, new_allocated)
+            mm.protect_range(self._body, ffi.sizeof('PListObject'))
             self._body.ob_items = items
             self._body.allocated = new_allocated
             ffi.cast('PVarObject *', self._body).ob_size = newsize
@@ -90,7 +90,7 @@ class PersistentList(abc.MutableSequence):
             if index > size:
                 index = size
             items = self._items
-            mm._tx_add_range_direct(items + index,
+            mm.protect_range(items + index,
                                     ffi.offsetof('PObjPtr *', newsize))
             for i in range(size, index, -1):
                 items[i] = items[i-1]
@@ -117,7 +117,7 @@ class PersistentList(abc.MutableSequence):
         items = self._items
         with mm:
             v_oid = mm._persist(value)
-            mm._tx_add_range_direct(ffi.addressof(items, index),
+            mm.protect_range(ffi.addressof(items, index),
                                     ffi.sizeof('PObjPtr *'))
             mm._xdecref(items[index])
             items[index] = v_oid
@@ -130,7 +130,7 @@ class PersistentList(abc.MutableSequence):
         newsize = size - 1
         items = self._items
         with mm:
-            mm._tx_add_range_direct(ffi.addressof(items, index),
+            mm.protect_range(ffi.addressof(items, index),
                                     ffi.offsetof('PObjPtr *', size))
             mm._decref(items[index])
             for i in range(index, newsize):
