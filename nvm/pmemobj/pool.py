@@ -193,6 +193,7 @@ class PersistentObjectPool(object):
         """
         self.mm.close()
 
+
     @property
     def root(self):
         """The root object of the pool's persistent object tree.
@@ -202,10 +203,19 @@ class PersistentObjectPool(object):
         between program runs *only* if it can be reached from the root object.
 
         """
-        return self.mm._root
+        return self.mm._resurrect(self.mm._pmem_root.root_object)
+
     @root.setter
     def root(self, value):
-        self.mm._root = value
+        log.debug("setting 'root' to %r", value)
+        with self, self.mm.lock:
+            oid = self.mm._persist(value)
+            self.mm._tx_add_range_direct(
+                ffi.addressof(self.mm._pmem_root.root_object),
+                ffi.sizeof('PObjPtr'))
+            self.mm._xdecref(self.mm._pmem_root.root_object)
+            self.mm._pmem_root.root_object = oid
+            self.mm._incref(oid)
 
     def begin_transaction(self):
         """Start a new (sub)transaction."""
@@ -320,21 +330,6 @@ class MemoryManager(object):
 
     def __del__(self):
         self.close()
-
-    @property
-    def _root(self):
-        return self._resurrect(self._pmem_root.root_object)
-    @_root.setter
-    def _root(self, value):
-        log.debug("setting 'root' to %r", value)
-        with self, self.lock:
-            oid = self._persist(value)
-            self._tx_add_range_direct(
-                ffi.addressof(self._pmem_root.root_object),
-                ffi.sizeof('PObjPtr'))
-            self._xdecref(self._pmem_root.root_object)
-            self._pmem_root.root_object = oid
-            self._incref(oid)
 
     #
     # Transaction management
@@ -695,14 +690,15 @@ class MemoryManager(object):
         # Trace the object tree, removing objects that are referenced.
         containers.remove(self._type_table._oid)
         live = [self._type_table._oid]
-        if hasattr(self._root, '_traverse'):
-            containers.remove(self._root._oid)
-            live.append(self._root._oid)
-        elif self._root is not None:
-            oid = _oid_as_tuple(self._pmem_root.root_object)
+        root_oid = _oid_as_tuple(self._pmem_root.root_object)
+        root = self._resurrect(root_oid)
+        if hasattr(root, '_traverse'):
+            containers.remove(root_oid)
+            live.append(root_oid)
+        elif root is not None:
             if debug:
-                log.debug('gc: non-container root: %s %r', oid, self._root)
-            other.remove(oid)
+                log.debug('gc: non-container root: %s %r', oid, root)
+            other.remove(root_oid)
         for oid in live:
             if debug:
                 log.debug('gc: checking live %s %r',
