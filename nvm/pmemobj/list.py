@@ -46,11 +46,11 @@ class PersistentList(abc.MutableSequence):
 
     @property
     def _items(self):
-        ob_items = self._body.ob_items
-        if self.__manager__._oids_eq(lib.OID_NULL, ob_items):
+        mm = self.__manager__
+        ob_items = mm.otuple(self._body.ob_items)
+        if ob_items == mm.OID_NULL:
             return None
-        return ffi.cast('PObjPtr *',
-                        self.__manager__.direct(ob_items))
+        return ffi.cast('PObjPtr *', mm.direct(ob_items))
 
     def _resize(self, newsize):
         mm = self.__manager__
@@ -176,10 +176,10 @@ class PersistentList(abc.MutableSequence):
         with mm:
             for i in range(self._size):
                 # Grab oid in tuple form so the assignment can't change it
-                oid = mm._oid_as_tuple(items[i])
-                if mm._oids_eq(lib.OID_NULL, oid):
+                oid = mm.otuple(items[i])
+                if oid == mm.OID_NULL:
                     continue
-                items[i] = lib.OID_NULL
+                items[i] = mm.OID_NULL
                 mm.decref(oid)
             self._resize(0)
 

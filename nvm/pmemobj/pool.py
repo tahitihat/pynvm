@@ -26,23 +26,6 @@ POBJECT_TYPE_NUM = 20
 POBJPTR_ARRAY_TYPE_NUM = 21
 
 
-# In general an oid is going to already be in tuple form, since that's what the
-# memory management routines return.  But sometimes we get an PMEMoid from a
-# list of pointers.  So we have to call _oid_as_tuple at a couple of other
-# strategic locations to make handling oids as transparent as possible.  This
-# all works because the tuple can be assigned to a "ctype PMEMoid &" and
-# likewise be used as the argument to a function that takes a PMEMoid by value.
-def _oid_as_tuple(oid):
-    """Return the oid as a tuple, return it unchanged if it already is one."""
-    if isinstance(oid, tuple):
-        return oid
-    return (oid.pool_uuid_lo, oid.off)
-
-def _oids_eq(oid1, oid2):
-    """Return True if the two oids hold the same data."""
-    return _oid_as_tuple(oid1) == _oid_as_tuple(oid2)
-
-
 # XXX move this to a central location and use in all libraries.
 def _coerce_fn(file_name):
     """Return 'char *' compatible file_name on both python2 and python3."""
@@ -84,13 +67,6 @@ def _check_errno(errno):
     """Raise an error if errno is not zero."""
     if errno:
         _raise_per_errno()
-
-def _check_oid(oid):
-    """Raise an error if oid is OID_NULL, otherwise return it.
-    """
-    if _oids_eq(OID_NULL, oid):
-        _raise_per_errno()
-    return oid
 
 _class_string_cache = {}
 def _class_string(cls):
@@ -378,7 +354,9 @@ class MemoryManager(object):
         log.debug('malloc: %r', size)
         if size == 0:
             return OID_NULL
-        oid = _oid_as_tuple(_check_oid(lib.pmemobj_tx_zalloc(size, type_num)))
+        oid = self.otuple(lib.pmemobj_tx_zalloc(size, type_num))
+        if oid == self.OID_NULL:
+            _raise_per_errno()
         log.debug('oid: %s', oid)
         return oid
 
@@ -396,19 +374,21 @@ class MemoryManager(object):
 
         Return pointer to the new memory.
         """
-        oid = _oid_as_tuple(oid)
+        oid = self.otuple(oid)
         log.debug('realloc: %r %r', oid, size)
         if size == 0:
             self.free(oid)
             return OID_NULL
         if type_num is None:
             type_num = lib.pmemobj_type_num(oid)
-        oid = _check_oid(lib.pmemobj_tx_zrealloc(oid, size, type_num))
+        oid = self.otuple(lib.pmemobj_tx_zrealloc(oid, size, type_num))
+        if oid == self.OID_NULL:
+            _raise_per_errno()
         log.debug('oid: %s', oid)
         return oid
 
     def realloc_ptrs(self, oid, count):
-        oid = _oid_as_tuple(oid)
+        oid = self.otuple(oid)
         log.debug('realloc_ptrs: %r %r', oid, count)
         """As realloc, but the new memory is enough for count pointers."""
         return self.realloc(oid, count * ffi.sizeof('PObjPtr'),
@@ -416,13 +396,13 @@ class MemoryManager(object):
 
     def free(self, oid):
         """Free the memory pointed to by oid."""
-        oid = _oid_as_tuple(oid)
+        oid = self.otuple(oid)
         log.debug('free: %r', oid)
         _check_errno(lib.pmemobj_tx_free(oid))
 
     def direct(self, oid):
         """Return the real memory address where oid lives."""
-        oid = _oid_as_tuple(oid)
+        oid = self.otuple(oid)
         return _check_null(lib.pmemobj_direct(oid))
 
     def protect_range(self, ptr, size):
@@ -439,7 +419,7 @@ class MemoryManager(object):
         # XXX WeakValueDictionary?
         # XXX I'm not sure we can get away with mapping OID_NULL
         # to None here, but try it and see.
-        self._resurrect_cache = {_oid_as_tuple(OID_NULL): None}
+        self._resurrect_cache = {self.otuple(OID_NULL): None}
 
     def _get_type_code(self, cls):
         """Return the index into the type table for cls.
@@ -486,7 +466,7 @@ class MemoryManager(object):
 
     def resurrect(self, oid):
         """Return python object representing the data stored at oid."""
-        oid = _oid_as_tuple(oid)
+        oid = self.otuple(oid)
         # XXX need multiple debug levels
         #log.debug('resurrect: %r', oid)
         try:
@@ -576,7 +556,7 @@ class MemoryManager(object):
 
     def incref(self, oid):
         """Increment the reference count of oid."""
-        oid = _oid_as_tuple(oid)
+        oid = self.otuple(oid)
         p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('incref %r %r', oid, p_obj.ob_refcnt + 1)
         with self:
@@ -585,7 +565,7 @@ class MemoryManager(object):
 
     def decref(self, oid):
         """Decrement the reference count of oid, and free it if zero."""
-        oid = _oid_as_tuple(oid)
+        oid = self.otuple(oid)
         p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('decref %r %r', oid, p_obj.ob_refcnt - 1)
         with self:
@@ -598,7 +578,7 @@ class MemoryManager(object):
 
     def xdecref(self, oid):
         """decref oid if it is not OID_NULL."""
-        if not _oids_eq(OID_NULL, oid):
+        if self.otuple(oid) != self.OID_NULL:
             self.decref(oid)
 
     def _deallocate(self, oid):
@@ -639,9 +619,8 @@ class MemoryManager(object):
         gc_counts = collections.defaultdict(int)
 
         # Catalog all PObjects.
-        oid = lib.pmemobj_first(self._pool_ptr)
-        while not _oids_eq(OID_NULL, oid):
-            oid = _oid_as_tuple(oid)
+        oid = self.otuple(lib.pmemobj_first(self._pool_ptr))
+        while oid != self.OID_NULL:
             type_num = lib.pmemobj_type_num(oid)
             # XXX Could make the _PTR lists PObjects too so they are tracked.
             if type_num == POBJECT_TYPE_NUM:
@@ -673,7 +652,7 @@ class MemoryManager(object):
                         log.debug('gc: other: %s %s %r',
                                   oid, obj.ob_refcnt, self.resurrect(oid))
                     other.add(oid)
-            oid = lib.pmemobj_next(oid)
+            oid = self.otuple(lib.pmemobj_next(oid))
         gc_counts['containers-total'] = len(containers)
         gc_counts['other-total'] = len(other)
 
@@ -690,7 +669,7 @@ class MemoryManager(object):
         # Trace the object tree, removing objects that are referenced.
         containers.remove(self._type_table._oid)
         live = [self._type_table._oid]
-        root_oid = _oid_as_tuple(self._pmem_root.root_object)
+        root_oid = self.otuple(self._pmem_root.root_object)
         root = self.resurrect(root_oid)
         if hasattr(root, '_traverse'):
             containers.remove(root_oid)
@@ -704,7 +683,7 @@ class MemoryManager(object):
                 log.debug('gc: checking live %s %r',
                           oid, self.resurrect(oid))
             for sub_oid in self.resurrect(oid)._traverse():
-                sub_key = _oid_as_tuple(sub_oid)
+                sub_key = self.otuple(sub_oid)
                 if sub_key in containers:
                     if debug:
                         log.debug('gc: refed container %s %r',
@@ -748,11 +727,26 @@ class MemoryManager(object):
 
         return dict(type_counts), dict(gc_counts)
 
-    # XXX temporary
-    def _oid_as_tuple(self, oid):
-        return _oid_as_tuple(oid)
-    def _oids_eq(self, *args):
-        return _oids_eq(*args)
+    #
+    # Utility methods
+    #
+
+    # An oid can be in two forms: a 'ctype PMEMoid &', which directly
+    # references the memory containing the PMEMoid, or a tuple containing
+    # the data from the two fields.  Such a tuple can be assigned to
+    # a 'ctype PMEMoid &' and the data will be copied into it correctly.
+    # In an ideal world tuple(oid) would ensure that oid was in tuple
+    # form, but cffi doesn't support that.  So we have a utility method
+    # that does it.
+
+    def otuple(self, oid):
+        """Return the oid as a tuple; return it unchanged if it already is one.
+        """
+        if isinstance(oid, tuple):
+            return oid
+        return (oid.pool_uuid_lo, oid.off)
+
+    OID_NULL = (lib.OID_NULL.pool_uuid_lo, lib.OID_NULL.off)
 
 
 #
