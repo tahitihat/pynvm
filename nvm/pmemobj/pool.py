@@ -159,6 +159,110 @@ class PersistentObjectPool(object):
     :func:`~nvm.pmemobj.create` or :func:`~nvm.pmemobj.open`.
     """
 
+    # This class mostly just delegates to its MemoryManager.  It provides
+    # the API that will be used by most programs.
+
+    # XXX create should be a keyword-only arg but we don't have those in 2.7.
+    def __init__(self, pool_ptr, filename, create=False):
+        """Provide an API to access the persistent memory object pool pool_ptr
+        backed by file filename, initializing it if create is True.
+
+        The PersistentObjectPool constructor should not be considered a public
+        API.  Use nvm.pmemobj.create to create a pool, and nvm.pmemobj.open to
+        open an existing pool.
+        """
+        self.mm = MemoryManager(pool_ptr, filename, create=create)
+
+    @property
+    def filename(self):
+        """The name of the file containing the object pool."""
+        return self.mm.filename
+
+    @property
+    def closed(self):
+        """True if and only if close has been called."""
+        return self.mm.closed
+
+    def close(self):
+        """Close the object pool, freeing any unreferenced objects.
+
+        The object pool itself lives on in the file that contains it and may be
+        reopened at a later date, and all the objects in it accessed, using
+        nvm.pmemobj.open.
+
+        """
+        self.mm.close()
+
+    @property
+    def root(self):
+        """The root object of the pool's persistent object tree.
+
+        Set this to something that can point to all the other objects that are
+        to be persisted, such as a list or dictionary.  An object is retained
+        between program runs *only* if it can be reached from the root object.
+
+        """
+        return self.mm._root
+    @root.setter
+    def root(self, value):
+        self.mm._root = value
+
+    def begin_transaction(self):
+        """Start a new (sub)transaction."""
+        log.debug('start_transaction')
+        _check_errno(
+            lib.pmemobj_tx_begin(self.mm._pool_ptr, ffi.NULL, ffi.NULL))
+
+    def commit_transaction(self):
+        """Commit the current (sub)transaction."""
+        log.debug('commit_transaction')
+        lib.pmemobj_tx_commit()
+        _check_errno(lib.pmemobj_tx_end())
+
+    def abort_transaction(self, errno=0):
+        """Abort the current (sub)transaction."""
+        log.debug('abort_transaction')
+        lib.pmemobj_tx_abort(errno)
+        if lib.pmemobj_tx_end() not in (0, errno.ECANCELED):
+            _raise_per_errno()
+
+    def __enter__(self):
+        """Begin a transaction context, optionally return the memory manager."""
+        return self.mm.__enter__()
+
+    def __exit__(self, *args, **kw):
+        """End the current transaction context."""
+        self.mm.__exit__(*args, **kw)
+
+    def new(self, typ, *args, **kw):
+        """Create a new instance of typ using args and kw, managed by this pool.
+
+        typ must accept a __manager__ keyword argument and use the supplied
+        MemoryManager for all persistent memory access.
+        """
+        log.debug('new: %s, %s, %s', typ, args, kw)
+        return typ(*args, __manager__=self.mm, **kw)
+
+    def gc(self, debug=False):
+        """Free all unreferenced objects (cyclic garbage).
+
+        The object tree is traced from the root, and any object that is not
+        referenced somewhere in the tree is freed.  This collects cyclic
+        garbage, and produces warnings for unreferenced objects with incorrect
+        refcounts.  Most garbage is automatically collected when the object is
+        no longer referenced.  If debug is true, the debug logging output
+        will include reprs of the objects encountered.
+        """
+        return self.mm.gc(debug=debug)
+
+
+class MemoryManager(object):
+    """Manage a PersistentObjectPool's memory.
+
+    This is the API to use when making a Persistent class with its own storage
+    layout.
+    """
+
     lock = RLock()
 
     #
@@ -175,7 +279,6 @@ class PersistentObjectPool(object):
         self._track_free = None
         if create:
             self._type_table = None
-            self._root = None
             self._init_caches()
             return
         # I don't think we can wrap a transaction around pool creation,
@@ -199,8 +302,6 @@ class PersistentObjectPool(object):
             # Make sure any objects orphaned by a crash are cleaned up.
             # XXX should fix this to only be called when there is a crash.
             self.gc()
-            # Resurrect the root object.
-            self._root = self._resurrect(pmem_root.root_object)
 
     def close(self):
         """This method closes the object pool.  The object pool itself lives on
@@ -221,10 +322,10 @@ class PersistentObjectPool(object):
         self.close()
 
     @property
-    def root(self):
+    def _root(self):
         return self._resurrect(self._pmem_root.root_object)
-    @root.setter
-    def root(self, value):
+    @_root.setter
+    def _root(self, value):
         log.debug("setting 'root' to %r", value)
         with self, self.lock:
             oid = self._persist(value)
@@ -239,35 +340,10 @@ class PersistentObjectPool(object):
     # Transaction management
     #
 
-    def begin_transaction(self):
-        """Start a new (sub)transaction."""
-        #log.debug('start_transaction')
-        _check_errno(lib.pmemobj_tx_begin(self._pool_ptr, ffi.NULL, ffi.NULL))
-
-    def commit_transaction(self):
-        """Commit the current (sub)transaction."""
-        #log.debug('commit_transaction')
-        lib.pmemobj_tx_commit()
-        _check_errno(lib.pmemobj_tx_end())
-
-    def _end_transaction(self):
-        """End the current (sub)transaction.
-
-        Raise an error if the returned errno is not 0 or ECNANCELED.
-        """
-        #log.debug('_end_transaction')
-        if lib.pmemobj_tx_end() not in (0, errno.ECANCELED):
-            _raise_per_errno()
-
-    def abort_transaction(self, errno=0):
-        """Abort the current (sub)transaction."""
-        log.debug('abort_transaction')
-        lib.pmemobj_tx_abort(errno)
-        self._end_transaction()
-
     def __enter__(self):
         #log.debug('__enter__')
-        self.begin_transaction()
+        _check_errno(lib.pmemobj_tx_begin(self._pool_ptr, ffi.NULL, ffi.NULL))
+        return self
 
     def __exit__(self, *args):
         stage = lib.pmemobj_tx_stage()
@@ -286,7 +362,8 @@ class PersistentObjectPool(object):
                 # XXX we should maybe use a unique error code here and raise an
                 # error on ECANCELED, I'm not sure.
                 lib.pmemobj_tx_abort(0)
-        self._end_transaction()
+        if lib.pmemobj_tx_end() not in (0, errno.ECANCELED):
+            _raise_per_errno()
 
     #
     # Memory management
@@ -618,13 +695,13 @@ class PersistentObjectPool(object):
         # Trace the object tree, removing objects that are referenced.
         containers.remove(self._type_table._oid)
         live = [self._type_table._oid]
-        if hasattr(self.root, '_traverse'):
-            containers.remove(self.root._oid)
-            live.append(self.root._oid)
-        elif self.root is not None:
+        if hasattr(self._root, '_traverse'):
+            containers.remove(self._root._oid)
+            live.append(self._root._oid)
+        elif self._root is not None:
             oid = _oid_as_tuple(self._pmem_root.root_object)
             if debug:
-                log.debug('gc: non-container root: %s %r', oid, self.root)
+                log.debug('gc: non-container root: %s %r', oid, self._root)
             other.remove(oid)
         for oid in live:
             if debug:
@@ -674,10 +751,6 @@ class PersistentObjectPool(object):
         log.debug('gc: end')
 
         return dict(type_counts), dict(gc_counts)
-
-    def new(self, typ, *args, **kw):
-        log.debug('new: %s, %s, %s', typ, args, kw)
-        return typ(*args, __manager__=self, **kw)
 
     # XXX temporary
     def _oid_as_tuple(self, oid):
@@ -729,17 +802,17 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     ret = _check_null(lib.pmemobj_create(_coerce_fn(filename), layout_version,
                                         pool_size, mode))
     pop = PersistentObjectPool(ret, filename, create=True)
-    pmem_root = lib.pmemobj_root(pop._pool_ptr, ffi.sizeof('PRoot'))
-    pmem_root = ffi.cast('PRoot *', pop._direct(pmem_root))
+    pmem_root = lib.pmemobj_root(pop.mm._pool_ptr, ffi.sizeof('PRoot'))
+    pmem_root = ffi.cast('PRoot *', pop.mm._direct(pmem_root))
     with pop:
         # Dummy first two elements; they are handled as special cases.
         type_table = PersistentList(
             [_class_string(PersistentList), _class_string(str)],
-            __manager__=pop)
+            __manager__=pop.mm)
         lib.pmemobj_tx_add_range_direct(pmem_root, ffi.sizeof('PRoot'))
         pmem_root.type_table = type_table._oid
-        pop._incref(type_table._oid)
-        pop._resurrect_cache[type_table._oid] = type_table
-        pop._pmem_root = pmem_root
-    pop._type_table = type_table
+        pop.mm._incref(type_table._oid)
+        pop.mm._resurrect_cache[type_table._oid] = type_table
+        pop.mm._pmem_root = pmem_root
+    pop.mm._type_table = type_table
     return pop
