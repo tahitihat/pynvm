@@ -147,12 +147,10 @@ class PersistentObjectPool(object):
         API.  Use nvm.pmemobj.create to create a pool, and nvm.pmemobj.open to
         open an existing pool.
         """
-        self.mm = MemoryManager(pool_ptr, filename, create=create)
-
-    @property
-    def filename(self):
-        """The name of the file containing the object pool."""
-        return self.mm.filename
+        log.debug('PersistentObjectPool.__init__: %r, %r, create=%s',
+                  pool_ptr, filename, create)
+        self.filename = filename
+        self.mm = MemoryManager(pool_ptr, create=create)
 
     @property
     def closed(self):
@@ -256,11 +254,10 @@ class MemoryManager(object):
     #
 
     # XXX create should be a keyword-only arg but we don't have those in 2.7.
-    def __init__(self, pool_ptr, filename, create=False):
-        log.debug('PersistentObjectPool.__init__: %r, %r, create=%s',
-                  pool_ptr, filename, create)
+    def __init__(self, pool_ptr, create=False):
+        log.debug('MemoryManager.__init__: %r, create=%s',
+                  pool_ptr, create)
         self._pool_ptr = pool_ptr
-        self.filename = filename
         self.closed = False
         self._track_free = None
         if create:
