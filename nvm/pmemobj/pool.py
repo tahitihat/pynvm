@@ -174,7 +174,7 @@ class PersistentObjectPool(object):
             self.mm._type_table = self.mm.resurrect(pmem_root.type_table)
             # Make sure any objects orphaned by a crash are cleaned up.
             # XXX should fix this to only be called when there is a crash.
-            self.mm.gc()
+            self.gc()
 
     def close(self):
         """Close the object pool, freeing any unreferenced objects.
@@ -191,7 +191,7 @@ class PersistentObjectPool(object):
             log.debug('close')
             self.closed = True     # doing this early helps with debugging
             # Clean up unreferenced object cycles.
-            self.mm.gc()
+            self.gc()
             lib.pmemobj_close(self.mm._pool_ptr)
 
     def __del__(self):
@@ -256,6 +256,7 @@ class PersistentObjectPool(object):
         log.debug('new: %s, %s, %s', typ, args, kw)
         return typ(*args, __manager__=self.mm, **kw)
 
+    # If I didn't have to support python2 I'd make debug keyword only.
     def gc(self, debug=False):
         """Free all unreferenced objects (cyclic garbage).
 
@@ -266,7 +267,128 @@ class PersistentObjectPool(object):
         no longer referenced.  If debug is true, the debug logging output
         will include reprs of the objects encountered.
         """
-        return self.mm.gc(debug=debug)
+        # XXX CPython uses a three generation GC in order to obtain more or
+        # less linear performance against the total number of objects.
+        # Currently we are not doing generations; we can get more complicated
+        # later if we want to run the GC periodically.
+
+        log.debug('gc: start')
+        containers = set()
+        other = set()
+        orphans = set()
+        types = {}
+        type_counts = collections.defaultdict(int)
+        gc_counts = collections.defaultdict(int)
+
+        with self.mm.lock:
+            # Catalog all PObjects.
+            oid = self.mm.otuple(lib.pmemobj_first(self._pool_ptr))
+            while oid != self.mm.OID_NULL:
+                type_num = lib.pmemobj_type_num(oid)
+                # XXX Could make the _PTR lists PObjects too so they are tracked.
+                if type_num == POBJECT_TYPE_NUM:
+                    obj =  ffi.cast('PObject *', self.mm.direct(oid))
+                    if debug:
+                        if obj.ob_refcnt < 0:
+                            log.error("Negative refcount (%s): %s %r",
+                                      obj.ob_refcnt, oid, self.mm.resurrect(oid))
+                    assert obj.ob_refcnt >= 0, '%s has negative refcnt' % oid
+                    # XXX move this cache to the POP?
+                    type_code = obj.ob_type
+                    if type_code not in types:
+                        types[type_code] = _find_class_from_string(
+                                                self.mm._type_table[type_code])
+                    typ = types[type_code]
+                    type_counts[typ.__name__] += 1
+                    if not obj.ob_refcnt:
+                        if debug:
+                            log.debug('gc: orphan: %s %s %r',
+                                      oid, obj.ob_refcnt, self.mm.resurrect(oid))
+                        orphans.add(oid)
+                    elif hasattr(typ, '_traverse'):
+                        if debug:
+                            log.debug('gc: container: %s %s %r',
+                                      oid, obj.ob_refcnt, self.mm.resurrect(oid))
+                        containers.add(oid)
+                    else:
+                        if debug:
+                            log.debug('gc: other: %s %s %r',
+                                      oid, obj.ob_refcnt, self.mm.resurrect(oid))
+                        other.add(oid)
+                oid = self.mm.otuple(lib.pmemobj_next(oid))
+            gc_counts['containers-total'] = len(containers)
+            gc_counts['other-total'] = len(other)
+
+            # Clean up refcount 0 orphans (from a crash or code bug).
+            log.debug("gc: deallocating %s orphans", len(orphans))
+            gc_counts['orphans0-gced'] = len(orphans)
+            for oid in orphans:
+                if debug:
+                    # XXX This should be a non debug warning on close.
+                    log.warning("deallocating orphan (refcount 0): %s %r",
+                                oid, self.mm.resurrect(oid))
+                self.mm._deallocate(oid)
+
+            # Trace the object tree, removing objects that are referenced.
+            containers.remove(self.mm._type_table._oid)
+            live = [self.mm._type_table._oid]
+            root_oid = self.mm.otuple(self.mm._pmem_root.root_object)
+            root = self.mm.resurrect(root_oid)
+            if hasattr(root, '_traverse'):
+                containers.remove(root_oid)
+                live.append(root_oid)
+            elif root is not None:
+                if debug:
+                    log.debug('gc: non-container root: %s %r', oid, root)
+                other.remove(root_oid)
+            for oid in live:
+                if debug:
+                    log.debug('gc: checking live %s %r',
+                              oid, self.mm.resurrect(oid))
+                for sub_oid in self.mm.resurrect(oid)._traverse():
+                    sub_key = self.mm.otuple(sub_oid)
+                    if sub_key in containers:
+                        if debug:
+                            log.debug('gc: refed container %s %r',
+                                       sub_key, self.mm.resurrect(sub_oid))
+                        containers.remove(sub_key)
+                        live.append(sub_key)
+                    elif sub_key in other:
+                        if debug:
+                            log.debug('gc: refed oid %s %r',
+                                      sub_key, self.mm.resurrect(sub_oid))
+                        other.remove(sub_key)
+                        gc_counts['other-live'] += 1
+            gc_counts['containers-live'] = len(live)
+
+            # Everything left is unreferenced via the root, deallocate it.
+            log.debug('gc: deallocating %s containers', len(containers))
+            self.mm._track_free = set()
+            for oid in containers:
+                if oid in self.mm._track_free:
+                    continue
+                if debug:
+                    log.debug('gc: deallocating container %s %r',
+                              oid, self.mm.resurrect(oid))
+                with self:
+                    # incref so we don't try to deallocate us during cycle clear.
+                    self.mm.incref(oid)
+                    self.mm._deallocate(oid)
+                    # deallocate frees oid, so no decref.
+            gc_counts['collections-gced'] = len(containers)
+            log.debug('gc: deallocating %s new orphans', len(other))
+            for oid in other:
+                if oid in self.mm._track_free:
+                    continue
+                log.warning("Orphaned with postive refcount: %s: %s",
+                    oid, self.mm.resurrect(oid))
+                self.mm._deallocate(oid)
+                gc_counts['orphans1-gced'] += 1
+            gc_counts['other-gced'] = len(other) - gc_counts['orphans1-gced']
+            self.mm._track_free = None
+            log.debug('gc: end')
+
+            return dict(type_counts), dict(gc_counts)
 
 
 class MemoryManager(object):
@@ -578,140 +700,6 @@ class MemoryManager(object):
             self.free(oid)
         if self._track_free is not None:
             self._track_free.add(oid)
-
-    # If I didn't have to support python2 I'd make debug keyword only.
-    def gc(self, debug=False):
-        """Examine all PObjects and free those no longer referenced.
-
-        There are two aspects to this: gc run at startup will clear out objects
-        that were allocated but never assigned, and gc run other times (eg: on
-        close) will look for cycles of objects with no external references and
-        free the cycles.
-
-        This is a public method to allow an application to clean up cycles
-        on demand.  It is not run automatically except at open and close.
-        """
-        # XXX CPython uses a three generation GC in order to obtain more or
-        # less linear performance against the total number of objects.
-        # Currently we are not doing generations; we can get more complicated
-        # later if we want to run the GC periodically.
-
-        log.debug('gc: start')
-        containers = set()
-        other = set()
-        orphans = set()
-        types = {}
-        type_counts = collections.defaultdict(int)
-        gc_counts = collections.defaultdict(int)
-
-        # Catalog all PObjects.
-        oid = self.otuple(lib.pmemobj_first(self._pool_ptr))
-        while oid != self.OID_NULL:
-            type_num = lib.pmemobj_type_num(oid)
-            # XXX Could make the _PTR lists PObjects too so they are tracked.
-            if type_num == POBJECT_TYPE_NUM:
-                obj =  ffi.cast('PObject *', self.direct(oid))
-                if debug:
-                    if obj.ob_refcnt < 0:
-                        log.error("Negative refcount (%s): %s %r",
-                                  obj.ob_refcnt, oid, self.resurrect(oid))
-                assert obj.ob_refcnt >= 0, '%s has negative refcnt' % oid
-                # XXX move this cache to the POP?
-                type_code = obj.ob_type
-                if type_code not in types:
-                    types[type_code] = _find_class_from_string(
-                                            self._type_table[type_code])
-                typ = types[type_code]
-                type_counts[typ.__name__] += 1
-                if not obj.ob_refcnt:
-                    if debug:
-                        log.debug('gc: orphan: %s %s %r',
-                                  oid, obj.ob_refcnt, self.resurrect(oid))
-                    orphans.add(oid)
-                elif hasattr(typ, '_traverse'):
-                    if debug:
-                        log.debug('gc: container: %s %s %r',
-                                  oid, obj.ob_refcnt, self.resurrect(oid))
-                    containers.add(oid)
-                else:
-                    if debug:
-                        log.debug('gc: other: %s %s %r',
-                                  oid, obj.ob_refcnt, self.resurrect(oid))
-                    other.add(oid)
-            oid = self.otuple(lib.pmemobj_next(oid))
-        gc_counts['containers-total'] = len(containers)
-        gc_counts['other-total'] = len(other)
-
-        # Clean up refcount 0 orphans (from a crash or code bug).
-        log.debug("gc: deallocating %s orphans", len(orphans))
-        gc_counts['orphans0-gced'] = len(orphans)
-        for oid in orphans:
-            if debug:
-                # XXX This should be a non debug warning on close.
-                log.warning("deallocating orphan (refcount 0): %s %r",
-                            oid, self.resurrect(oid))
-            self._deallocate(oid)
-
-        # Trace the object tree, removing objects that are referenced.
-        containers.remove(self._type_table._oid)
-        live = [self._type_table._oid]
-        root_oid = self.otuple(self._pmem_root.root_object)
-        root = self.resurrect(root_oid)
-        if hasattr(root, '_traverse'):
-            containers.remove(root_oid)
-            live.append(root_oid)
-        elif root is not None:
-            if debug:
-                log.debug('gc: non-container root: %s %r', oid, root)
-            other.remove(root_oid)
-        for oid in live:
-            if debug:
-                log.debug('gc: checking live %s %r',
-                          oid, self.resurrect(oid))
-            for sub_oid in self.resurrect(oid)._traverse():
-                sub_key = self.otuple(sub_oid)
-                if sub_key in containers:
-                    if debug:
-                        log.debug('gc: refed container %s %r',
-                                   sub_key, self.resurrect(sub_oid))
-                    containers.remove(sub_key)
-                    live.append(sub_key)
-                elif sub_key in other:
-                    if debug:
-                        log.debug('gc: refed oid %s %r',
-                                  sub_key, self.resurrect(sub_oid))
-                    other.remove(sub_key)
-                    gc_counts['other-live'] += 1
-        gc_counts['containers-live'] = len(live)
-
-        # Everything left is unreferenced via the root, deallocate it.
-        log.debug('gc: deallocating %s containers', len(containers))
-        self._track_free = set()
-        for oid in containers:
-            if oid in self._track_free:
-                continue
-            if debug:
-                log.debug('gc: deallocating container %s %r',
-                          oid, self.resurrect(oid))
-            with self:
-                # incref so we don't try to deallocate us during cycle clear.
-                self.incref(oid)
-                self._deallocate(oid)
-                # deallocate frees oid, so no decref.
-        gc_counts['collections-gced'] = len(containers)
-        log.debug('gc: deallocating %s new orphans', len(other))
-        for oid in other:
-            if oid in self._track_free:
-                continue
-            log.warning("Orphaned with postive refcount: %s: %s",
-                oid, self.resurrect(oid))
-            self._deallocate(oid)
-            gc_counts['orphans1-gced'] += 1
-        gc_counts['other-gced'] = len(other) - gc_counts['orphans1-gced']
-        self._track_free = None
-        log.debug('gc: end')
-
-        return dict(type_counts), dict(gc_counts)
 
     #
     # Utility methods
