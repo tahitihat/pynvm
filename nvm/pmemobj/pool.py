@@ -135,8 +135,9 @@ class PersistentObjectPool(object):
     :func:`~nvm.pmemobj.create` or :func:`~nvm.pmemobj.open`.
     """
 
-    # This class mostly just delegates to its MemoryManager.  It provides
-    # the API that will be used by most programs.
+    # This class  provides the API that will be used by most programs.
+
+    lock = RLock()
 
     # XXX create should be a keyword-only arg but we don't have those in 2.7.
     def __init__(self, pool_ptr, filename, create=False):
@@ -163,7 +164,7 @@ class PersistentObjectPool(object):
         # is non-zero we know initialization is complete, since we have a
         # transaction wrapped around the setup that comes after the initial
         # root pmem-object creation.
-        with self.mm.lock:
+        with self.lock:
             size = lib.pmemobj_root_size(self._pool_ptr)
             if size:
                 pmem_root = self.mm.direct(lib.pmemobj_root(self._pool_ptr, 0))
@@ -186,7 +187,7 @@ class PersistentObjectPool(object):
         nvm.pmemobj.open.
 
         """
-        with self.mm.lock:
+        with self.lock:
             if self.closed:
                 log.debug('already closed')
                 return
@@ -213,7 +214,7 @@ class PersistentObjectPool(object):
     @root.setter
     def root(self, value):
         log.debug("setting 'root' to %r", value)
-        with self, self.mm.lock:
+        with self, self.lock:
             oid = self.mm.persist(value)
             self.mm.protect_range(
                 ffi.addressof(self._pmem_root.root_object),
@@ -282,7 +283,7 @@ class PersistentObjectPool(object):
         type_counts = collections.defaultdict(int)
         gc_counts = collections.defaultdict(int)
 
-        with self.mm.lock:
+        with self.lock:
             # Catalog all PObjects.
             oid = self.mm.otuple(lib.pmemobj_first(self._pool_ptr))
             while oid != self.mm.OID_NULL:
@@ -399,8 +400,6 @@ class MemoryManager(object):
     This is the API to use when making a Persistent class with its own storage
     layout.
     """
-
-    lock = RLock()
 
     #
     # Pool management
