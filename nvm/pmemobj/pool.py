@@ -151,11 +151,7 @@ class PersistentObjectPool(object):
                   pool_ptr, filename, create)
         self.filename = filename
         self.mm = MemoryManager(pool_ptr, create=create)
-
-    @property
-    def closed(self):
-        """True if and only if close has been called."""
-        return self.mm.closed
+        self.closed = False
 
     def close(self):
         """Close the object pool, freeing any unreferenced objects.
@@ -165,8 +161,18 @@ class PersistentObjectPool(object):
         nvm.pmemobj.open.
 
         """
-        self.mm.close()
+        with self.mm.lock:
+            if self.closed:
+                log.debug('already closed')
+                return
+            log.debug('close')
+            self.closed = True     # doing this early helps with debugging
+            # Clean up unreferenced object cycles.
+            self.mm.gc()
+            lib.pmemobj_close(self.mm._pool_ptr)
 
+    def __del__(self):
+        self.close()
 
     @property
     def root(self):
@@ -258,7 +264,6 @@ class MemoryManager(object):
         log.debug('MemoryManager.__init__: %r, create=%s',
                   pool_ptr, create)
         self._pool_ptr = pool_ptr
-        self.closed = False
         self._track_free = None
         if create:
             self._type_table = None
@@ -285,24 +290,6 @@ class MemoryManager(object):
             # Make sure any objects orphaned by a crash are cleaned up.
             # XXX should fix this to only be called when there is a crash.
             self.gc()
-
-    def close(self):
-        """This method closes the object pool.  The object pool itself lives on
-        in the file that contains it and may be reopened at a later date, and
-        all the objects in it accessed, using :func:`~nvm.pmemlog.open`.
-        """
-        with self.lock:
-            if self.closed:
-                log.debug('already closed')
-                return
-            log.debug('close')
-            self.closed = True     # doing this early helps with debugging
-            # Clean up unreferenced object cycles.
-            self.gc()
-            lib.pmemobj_close(self._pool_ptr)
-
-    def __del__(self):
-        self.close()
 
     #
     # Transaction management
