@@ -172,7 +172,7 @@ class PersistentObjectPool(object):
             if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
                 raise RuntimeError("Pool {} not initialized completely".format(
                     self.filename))
-            self.mm._pmem_root = pmem_root
+            self._pmem_root = pmem_root
             self.mm._type_table = self.mm.resurrect(pmem_root.type_table)
             # Make sure any objects orphaned by a crash are cleaned up.
             # XXX should fix this to only be called when there is a crash.
@@ -208,7 +208,7 @@ class PersistentObjectPool(object):
         between program runs *only* if it can be reached from the root object.
 
         """
-        return self.mm.resurrect(self.mm._pmem_root.root_object)
+        return self.mm.resurrect(self._pmem_root.root_object)
 
     @root.setter
     def root(self, value):
@@ -216,10 +216,10 @@ class PersistentObjectPool(object):
         with self, self.mm.lock:
             oid = self.mm.persist(value)
             self.mm.protect_range(
-                ffi.addressof(self.mm._pmem_root.root_object),
+                ffi.addressof(self._pmem_root.root_object),
                 ffi.sizeof('PObjPtr'))
-            self.mm.xdecref(self.mm._pmem_root.root_object)
-            self.mm._pmem_root.root_object = oid
+            self.mm.xdecref(self._pmem_root.root_object)
+            self._pmem_root.root_object = oid
             self.mm.incref(oid)
 
     def begin_transaction(self):
@@ -334,7 +334,7 @@ class PersistentObjectPool(object):
             # Trace the object tree, removing objects that are referenced.
             containers.remove(self.mm._type_table._oid)
             live = [self.mm._type_table._oid]
-            root_oid = self.mm.otuple(self.mm._pmem_root.root_object)
+            root_oid = self.mm.otuple(self._pmem_root.root_object)
             root = self.mm.resurrect(root_oid)
             if hasattr(root, '_traverse'):
                 containers.remove(root_oid)
@@ -779,6 +779,6 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
         pmem_root.type_table = type_table._oid
         pop.mm.incref(type_table._oid)
         pop.mm._resurrect_cache[type_table._oid] = type_table
-        pop.mm._pmem_root = pmem_root
+        pop._pmem_root = pmem_root
     pop.mm._type_table = type_table
     return pop
