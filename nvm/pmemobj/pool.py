@@ -151,6 +151,8 @@ class PersistentObjectPool(object):
                   pool_ptr, filename, create)
         self._pool_ptr = pool_ptr
         self.filename = filename
+        # The only thing the MemoryManager needs the pool pointer for is
+        # to start transactions.
         self.mm = MemoryManager(pool_ptr, create=create)
         self.closed = False
         if create:
@@ -192,7 +194,7 @@ class PersistentObjectPool(object):
             self.closed = True     # doing this early helps with debugging
             # Clean up unreferenced object cycles.
             self.gc()
-            lib.pmemobj_close(self.mm._pool_ptr)
+            lib.pmemobj_close(self._pool_ptr)
 
     def __del__(self):
         self.close()
@@ -224,7 +226,7 @@ class PersistentObjectPool(object):
         """Start a new (sub)transaction."""
         log.debug('start_transaction')
         _check_errno(
-            lib.pmemobj_tx_begin(self.mm._pool_ptr, ffi.NULL, ffi.NULL))
+            lib.pmemobj_tx_begin(self._pool_ptr, ffi.NULL, ffi.NULL))
 
     def commit_transaction(self):
         """Commit the current (sub)transaction."""
@@ -408,8 +410,8 @@ class MemoryManager(object):
     def __init__(self, pool_ptr, create=False):
         log.debug('MemoryManager.__init__: %r, create=%s',
                   pool_ptr, create)
-        self._init_caches()
         self._pool_ptr = pool_ptr
+        self._init_caches()
         self._track_free = None
         if create:
             self._type_table = None
