@@ -149,9 +149,32 @@ class PersistentObjectPool(object):
         """
         log.debug('PersistentObjectPool.__init__: %r, %r, create=%s',
                   pool_ptr, filename, create)
+        self._pool_ptr = pool_ptr
         self.filename = filename
         self.mm = MemoryManager(pool_ptr, create=create)
         self.closed = False
+        if create:
+            return
+        # I don't think we can wrap a transaction around pool creation,
+        # since we aren't using pmemobj_root_construct, so we need to check
+        # each of the steps we can't bracket.  But if the type table pointer
+        # is non-zero we know initialization is complete, since we have a
+        # transaction wrapped around the setup that comes after the initial
+        # root pmem-object creation.
+        with self.mm.lock:
+            size = lib.pmemobj_root_size(self._pool_ptr)
+            if size:
+                pmem_root = self.mm.direct(lib.pmemobj_root(self._pool_ptr, 0))
+                pmem_root = ffi.cast('PRoot *', pmem_root)
+            # I'm not sure the check for pmem_root not NULL is needed.
+            if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
+                raise RuntimeError("Pool {} not initialized completely".format(
+                    self.filename))
+            self.mm._pmem_root = pmem_root
+            self.mm._type_table = self.mm.resurrect(pmem_root.type_table)
+            # Make sure any objects orphaned by a crash are cleaned up.
+            # XXX should fix this to only be called when there is a crash.
+            self.mm.gc()
 
     def close(self):
         """Close the object pool, freeing any unreferenced objects.
@@ -263,33 +286,12 @@ class MemoryManager(object):
     def __init__(self, pool_ptr, create=False):
         log.debug('MemoryManager.__init__: %r, create=%s',
                   pool_ptr, create)
+        self._init_caches()
         self._pool_ptr = pool_ptr
         self._track_free = None
         if create:
             self._type_table = None
-            self._init_caches()
             return
-        # I don't think we can wrap a transaction around pool creation,
-        # since we aren't using pmemobj_root_construct, so we need to check
-        # each of the steps we can't bracket.  But if the type table pointer
-        # is non-zero we know initialization is complete, since we have a
-        # transaction wrapped around the setup that comes after the initial
-        # root pmem-object creation.
-        with self.lock:
-            self._init_caches()
-            size = lib.pmemobj_root_size(self._pool_ptr)
-            if size:
-                pmem_root = self.direct(lib.pmemobj_root(self._pool_ptr, 0))
-                pmem_root = ffi.cast('PRoot *', pmem_root)
-            # I'm not sure the check for pmem_root not NULL is needed.
-            if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
-                raise RuntimeError("Pool {} not initialized completely".format(
-                    self.filename))
-            self._pmem_root = pmem_root
-            self._type_table = self.resurrect(pmem_root.type_table)
-            # Make sure any objects orphaned by a crash are cleaned up.
-            # XXX should fix this to only be called when there is a crash.
-            self.gc()
 
     #
     # Transaction management
