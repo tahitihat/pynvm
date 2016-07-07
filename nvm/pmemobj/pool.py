@@ -138,15 +138,11 @@ class MemoryManager(object):
     """
 
     # XXX create should be a keyword-only arg but we don't have those in 2.7.
-    def __init__(self, pool_ptr, create=False):
-        log.debug('MemoryManager.__init__: %r, create=%s',
-                  pool_ptr, create)
+    def __init__(self, pool_ptr, type_table=None):
+        log.debug('MemoryManager.__init__: %r', pool_ptr)
         self._pool_ptr = pool_ptr
         self._init_caches()
         self._track_free = None
-        if create:
-            self._type_table = None
-            return
 
     #
     # Transaction management
@@ -480,7 +476,7 @@ class PersistentObjectPool(object):
         self.filename = filename
         # The only thing the MemoryManager needs the pool pointer for is
         # to start transactions.
-        self.mm = MemoryManager(pool_ptr, create=create)
+        self.mm = MemoryManager(pool_ptr)
         self.closed = False
         if create:
             return
