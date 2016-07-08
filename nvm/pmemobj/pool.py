@@ -484,9 +484,10 @@ class PersistentObjectPool(object):
     # This class  provides the API that will be used by most programs.
 
     lock = RLock()
+    closed = False
 
     # XXX create should be a keyword-only arg but we don't have those in 2.7.
-    def __init__(self, pool_ptr, filename, create=False):
+    def __init__(self, pool_ptr, filename, create=False, pool_size=MIN_POOL_SIZE, mode=0o666):
         """Provide an API to access the persistent memory object pool pool_ptr
         backed by file filename, initializing it if create is True.
 
@@ -500,16 +501,29 @@ class PersistentObjectPool(object):
         self.filename = filename
         # The only thing the MemoryManager needs the pool pointer for is
         # to start transactions.
-        self.mm = MemoryManager(pool_ptr)
-        self.closed = False
+        mm = self.mm = MemoryManager(pool_ptr)
         if create:
-            return
-        # I don't think we can wrap a transaction around pool creation,
-        # since we aren't using pmemobj_root_construct, so we need to check
-        # each of the steps we can't bracket.  But if the type table pointer
-        # is non-zero we know initialization is complete, since we have a
-        # transaction wrapped around the setup that comes after the initial
-        # root pmem-object creation.
+            self._create(pool_size, mode)
+        else:
+            self._open()
+
+    def _create(self, pool_size, mode):
+        with self as mm:
+            pmem_root = lib.pmemobj_root(mm._pool_ptr, ffi.sizeof('PRoot'))
+            pmem_root = ffi.cast('PRoot *', mm.direct(pmem_root))
+            type_table_oid = mm._create_type_table()
+            mm.protect_range(pmem_root, ffi.sizeof('PRoot'))
+            pmem_root.type_table = type_table_oid
+            self._pmem_root = pmem_root
+
+    def _open(self):
+        # I don't think pmemobj_root being inside the transaction makes it
+        # atomic, we aren't using pmemobj_root_construct, so we need to check
+        # for errors in that first root creation step.  If the type table
+        # pointer is non-zero we know initialization was complete.  On the
+        # other hand, for open we do need to hold the lock.  (It would be
+        # inefficient to have more than one POP in a process, but there is no
+        # particular reason to prevent it.)
         with self.lock:
             size = lib.pmemobj_root_size(self._pool_ptr)
             if size:
@@ -778,12 +792,4 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     log.debug('create: %s, %s, %s', filename, pool_size, mode)
     ret = _check_null(lib.pmemobj_create(_coerce_fn(filename), layout_version,
                                         pool_size, mode))
-    pop = PersistentObjectPool(ret, filename, create=True)
-    pmem_root = lib.pmemobj_root(pop.mm._pool_ptr, ffi.sizeof('PRoot'))
-    pmem_root = ffi.cast('PRoot *', pop.mm.direct(pmem_root))
-    with pop:
-        type_table_oid = pop.mm._create_type_table()
-        pop.mm.protect_range(pmem_root, ffi.sizeof('PRoot'))
-        pmem_root.type_table = type_table_oid
-        pop._pmem_root = pmem_root
-    return pop
+    return PersistentObjectPool(ret, filename, True, pool_size, mode)
