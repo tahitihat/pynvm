@@ -53,12 +53,11 @@ class PersistentList(abc.MutableSequence):
         return ffi.cast('PObjPtr *', mm.direct(ob_items))
 
     def _resize(self, newsize):
-        mm = self.__manager__
         allocated = self._allocated
         # Only realloc if we don't have enough space already.
         if (allocated >= newsize and newsize >= allocated >> 1):
             assert self._items != None or newsize == 0
-            with mm:
+            with self.__manager__ as mm:
                 mm.protect_range(self._body, ffi.sizeof('PVarObject'))
                 ffi.cast('PVarObject *', self._body).ob_size = newsize
             return
@@ -67,7 +66,7 @@ class PersistentList(abc.MutableSequence):
         if newsize == 0:
             new_allocated = 0
         items = self._items
-        with mm:
+        with self.__manager__ as mm:
             if items is None:
                 items = mm.malloc_ptrs(new_allocated)
             else:
@@ -78,8 +77,7 @@ class PersistentList(abc.MutableSequence):
             ffi.cast('PVarObject *', self._body).ob_size = newsize
 
     def insert(self, index, value):
-        mm = self.__manager__
-        with mm:
+        with self.__manager__ as mm:
             size = self._size
             newsize = size + 1
             self._resize(newsize)
@@ -113,9 +111,8 @@ class PersistentList(abc.MutableSequence):
 
     def __setitem__(self, index, value):
         index = self._normalize_index(index)
-        mm = self.__manager__
         items = self._items
-        with mm:
+        with self.__manager__ as mm:
             v_oid = mm.persist(value)
             mm.protect_range(ffi.addressof(items, index),
                                     ffi.sizeof('PObjPtr *'))
@@ -125,11 +122,10 @@ class PersistentList(abc.MutableSequence):
 
     def __delitem__(self, index):
         index = self._normalize_index(index)
-        mm = self.__manager__
         size = self._size
         newsize = size - 1
         items = self._items
-        with mm:
+        with self.__manager__ as mm:
             mm.protect_range(ffi.addressof(items, index),
                                     ffi.offsetof('PObjPtr *', size))
             mm.decref(items[index])
@@ -171,9 +167,8 @@ class PersistentList(abc.MutableSequence):
     def clear(self):
         if self._size == 0:
             return
-        mm = self.__manager__
         items = self._items
-        with mm:
+        with self.__manager__ as mm:
             for i in range(self._size):
                 # Grab oid in tuple form so the assignment can't change it
                 oid = mm.otuple(items[i])
