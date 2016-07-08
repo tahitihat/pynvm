@@ -258,6 +258,30 @@ class MemoryManager(object):
         # to None here, but try it and see.
         self._resurrect_cache = {self.otuple(OID_NULL): None}
 
+    def _resurrect_type_table(self, oid):
+        """Resurrect the type table from oid.
+
+        This is a private method for coordination between the
+        PersistentObjectPool and the MemoryManager.
+        """
+        self._type_table = self.resurrect(oid)
+
+    def _create_type_table(self):
+        """Create an initial type table and return its oid.
+
+        This is a private method for coordination between the
+        PersistentObjectPool and the MemoryManager.
+        """
+        with self:
+            # Pre-fill first two elements; they are handled as special cases.
+            type_table = PersistentList(
+                [_class_string(PersistentList), _class_string(str)],
+                __manager__=self)
+            self.incref(type_table._oid)
+            self._resurrect_cache[type_table._oid] = type_table
+        self._type_table = type_table
+        return type_table._oid
+
     def _get_type_code(self, cls):
         """Return the index into the type table for cls.
 
@@ -496,7 +520,7 @@ class PersistentObjectPool(object):
                 raise RuntimeError("Pool {} not initialized completely".format(
                     self.filename))
             self._pmem_root = pmem_root
-            self.mm._type_table = self.mm.resurrect(pmem_root.type_table)
+            self.mm._resurrect_type_table(pmem_root.type_table)
             # Make sure any objects orphaned by a crash are cleaned up.
             # XXX should fix this to only be called when there is a crash.
             self.gc()
@@ -758,14 +782,8 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     pmem_root = lib.pmemobj_root(pop.mm._pool_ptr, ffi.sizeof('PRoot'))
     pmem_root = ffi.cast('PRoot *', pop.mm.direct(pmem_root))
     with pop:
-        # Dummy first two elements; they are handled as special cases.
-        type_table = PersistentList(
-            [_class_string(PersistentList), _class_string(str)],
-            __manager__=pop.mm)
+        type_table_oid = pop.mm._create_type_table()
         pop.mm.protect_range(pmem_root, ffi.sizeof('PRoot'))
-        pmem_root.type_table = type_table._oid
-        pop.mm.incref(type_table._oid)
-        pop.mm._resurrect_cache[type_table._oid] = type_table
+        pmem_root.type_table = type_table_oid
         pop._pmem_root = pmem_root
-    pop.mm._type_table = type_table
     return pop
