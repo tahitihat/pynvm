@@ -487,57 +487,59 @@ class PersistentObjectPool(object):
     closed = False
 
     # XXX create should be a keyword-only arg but we don't have those in 2.7.
-    def __init__(self, pool_ptr, filename, create=False, pool_size=MIN_POOL_SIZE, mode=0o666):
-        """Provide an API to access the persistent memory object pool pool_ptr
-        backed by file filename, initializing it if create is True.
+    def __init__(self, filename, pool_size=MIN_POOL_SIZE, mode=0o666):
+        """Open or create a persistent object pool backed by filename.
 
-        The PersistentObjectPool constructor should not be considered a public
-        API.  Use nvm.pmemobj.create to create a pool, and nvm.pmemobj.open to
-        open an existing pool.
+        If the file gets created, use pool_size as the size of the new pool in
+        bytes and mode as its access mode, otherwise ignore these parameters
+        and open the existing file.
+
+        See also the open and create functions of nvm.pmemobj, which insure
+        that the file exists or does not, respectively.
         """
-        log.debug('PersistentObjectPool.__init__: %r, %r, create=%s',
-                  pool_ptr, filename, create)
-        self._pool_ptr = pool_ptr
+        log.debug('PersistentObjectPool.__init__: %r, %r, %r',
+                  filename, pool_size, mode)
         self.filename = filename
-        # The only thing the MemoryManager needs the pool pointer for is
-        # to start transactions.
-        mm = self.mm = MemoryManager(pool_ptr)
-        if create:
-            self._create(pool_size, mode)
+        if os.path.exists(filename):
+            self._open(filename)
         else:
-            self._open()
+            self._create(filename, pool_size, mode)
 
-    def _create(self, pool_size, mode):
+
+    def _create(self, filename, pool_size, mode):
+        self._pool_ptr = _check_null(lib.pmemobj_create(_coerce_fn(filename),
+                                                        layout_version,
+                                                        pool_size, mode))
+        mm = self.mm = MemoryManager(self._pool_ptr)
         with self as mm:
-            pmem_root = lib.pmemobj_root(mm._pool_ptr, ffi.sizeof('PRoot'))
+            pmem_root = lib.pmemobj_root(self._pool_ptr, ffi.sizeof('PRoot'))
             pmem_root = ffi.cast('PRoot *', mm.direct(pmem_root))
             type_table_oid = mm._create_type_table()
             mm.protect_range(pmem_root, ffi.sizeof('PRoot'))
             pmem_root.type_table = type_table_oid
             self._pmem_root = pmem_root
 
-    def _open(self):
+    def _open(self, filename):
         # I don't think pmemobj_root being inside the transaction makes it
         # atomic, we aren't using pmemobj_root_construct, so we need to check
         # for errors in that first root creation step.  If the type table
-        # pointer is non-zero we know initialization was complete.  On the
-        # other hand, for open we do need to hold the lock.  (It would be
-        # inefficient to have more than one POP in a process, but there is no
-        # particular reason to prevent it.)
-        with self.lock:
-            size = lib.pmemobj_root_size(self._pool_ptr)
-            if size:
-                pmem_root = self.mm.direct(lib.pmemobj_root(self._pool_ptr, 0))
-                pmem_root = ffi.cast('PRoot *', pmem_root)
-            # I'm not sure the check for pmem_root not NULL is needed.
-            if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
-                raise RuntimeError("Pool {} not initialized completely".format(
-                    self.filename))
-            self._pmem_root = pmem_root
-            self.mm._resurrect_type_table(pmem_root.type_table)
-            # Make sure any objects orphaned by a crash are cleaned up.
-            # XXX should fix this to only be called when there is a crash.
-            self.gc()
+        # pointer is non-zero we know initialization was complete.
+        self._pool_ptr = _check_null(lib.pmemobj_open(_coerce_fn(filename),
+                                                      layout_version))
+        mm = self.mm = MemoryManager(self._pool_ptr)
+        size = lib.pmemobj_root_size(self._pool_ptr)
+        if size:
+            pmem_root = mm.direct(lib.pmemobj_root(self._pool_ptr, 0))
+            pmem_root = ffi.cast('PRoot *', pmem_root)
+        # I'm not sure the check for pmem_root not NULL is needed.
+        if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
+            raise RuntimeError("Pool {} not initialized completely".format(
+                self.filename))
+        self._pmem_root = pmem_root
+        mm._resurrect_type_table(pmem_root.type_table)
+        # Make sure any objects orphaned by a crash are cleaned up.
+        # XXX should fix this to only be called when there is a crash.
+        self.gc()
 
     def close(self):
         """Close the object pool, freeing any unreferenced objects.
@@ -558,7 +560,16 @@ class PersistentObjectPool(object):
             lib.pmemobj_close(self._pool_ptr)
 
     def __del__(self):
-        self.close()
+        if hasattr(self, '_pmem_root'):
+            # Initialization was complete, do a full close.
+            self.close()
+        elif hasattr(self, '_pool_ptr'):
+            # Initialization was not complete, just close the libpmemobj.
+            lib.pmemobj_close(self._pool_ptr)
+        else:
+            # libpmemobj open failed, nothing to do.
+            pass
+
 
     @property
     def root(self):
@@ -767,8 +778,11 @@ def open(filename):
     :return: a :class:`PersistentObjectPool` instance that manages the pool.
     """
     log.debug('open: %s', filename)
-    ret = _check_null(lib.pmemobj_open(_coerce_fn(filename), layout_version))
-    return PersistentObjectPool(ret, filename)
+    # Make sure the file exists.
+    if not os.path.exists(filename):
+        # Pass through the libpmemobj error message.
+        _check_null(lib.pmemobj_open(_coerce_fn(filename), layout_version))
+    return PersistentObjectPool(filename)
 
 def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     """The `create()` function creates an object pool with the given total
@@ -786,10 +800,10 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     :param mode: specifies the permissions to use when creating the file.
     :return: a :class:`PersistentObjectPool` instance that manages the pool.
     """
-    # Assume create does an atomic create of the file before it does anything
-    # else persistent, so therefore we don't need a thread lock around this
-    # function body.
     log.debug('create: %s, %s, %s', filename, pool_size, mode)
-    ret = _check_null(lib.pmemobj_create(_coerce_fn(filename), layout_version,
-                                        pool_size, mode))
-    return PersistentObjectPool(ret, filename, True, pool_size, mode)
+    # Make sure the file does not already exist.
+    if os.path.exists(filename):
+        # Pass through the libpmemobj error message.
+        _check_null(lib.pmemobj_create(_coerce_fn(filename), layout_version,
+                                       pool_size, mode))
+    return PersistentObjectPool(filename, pool_size, mode)

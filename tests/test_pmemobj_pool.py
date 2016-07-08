@@ -73,6 +73,23 @@ class TestPersistentObjectPool(TestCase):
         pop.close()
         pop.close()
 
+    def test_create_is_error_if_already_exists(self):
+        fn = self._test_fn()
+        pop = pmemobj.create(fn)
+        pop.close()
+        with self.assertRaises(OSError):
+            pmemobj.create(fn)
+
+    def test_open_is_error_if_does_not_exist(self):
+        fn = self._test_fn()
+        with self.assertRaises(OSError):
+            pmemobj.open(fn)
+
+    def test_filename_is_preserved(self):
+        fn = self._test_fn()
+        pop = pmemobj.create(fn)
+        self.assertEqual(pop.filename, fn)
+
 
 @parameterize
 class TestSimpleImmutablePersistence(TestCase):
