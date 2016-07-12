@@ -7,6 +7,9 @@ from nvm import pmemobj
 from tests.support import TestCase, parameterize
 
 
+class TestFoo(object):
+    pass
+
 
 class TestPersistentObjectPool(TestCase):
 
@@ -88,7 +91,16 @@ class TestPersistentObjectPool(TestCase):
     def test_filename_is_preserved(self):
         fn = self._test_fn()
         pop = pmemobj.create(fn)
+        self.addCleanup(pop.close)
         self.assertEqual(pop.filename, fn)
+
+    def test_unknown_nonpersistent_type(self):
+        fn = self._test_fn()
+        pop = pmemobj.create(fn)
+        self.addCleanup(pop.close)
+        with self.assertRaises(TypeError) as cm:
+            pop.root = TestFoo()
+        self.assertMsgBits(str(cm.exception), "on't know how", "TestFoo")
 
 
 @parameterize

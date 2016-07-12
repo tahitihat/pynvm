@@ -316,7 +316,7 @@ class MemoryManager(object):
         cls_str = _class_string(obj.__class__)
         persister = '_persist_' + cls_str.replace(':', '_')
         if not hasattr(self, persister):
-            raise TypeError("Don't know now to persist {!r}".format(cls_str))
+            raise TypeError("Don't know how to persist {!r}".format(cls_str))
         oid = getattr(self, persister)(obj)
         # This oid should always come from a malloc, and thus be a tuple,
         # and so the correct value to use as a key without calling _as_tuple.
