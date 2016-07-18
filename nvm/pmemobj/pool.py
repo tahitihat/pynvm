@@ -446,7 +446,8 @@ class MemoryManager(object):
         p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('incref %r %r', oid, p_obj.ob_refcnt + 1)
         with self.transaction():
-            self.snapshot_range(p_obj, ffi.sizeof('PObject'))
+            self.snapshot_range(ffi.addressof(p_obj, 'ob_refcnt'),
+                                ffi.sizeof('size_t'))
             p_obj.ob_refcnt += 1
 
     def decref(self, oid):
@@ -456,7 +457,8 @@ class MemoryManager(object):
         log.debug('decref %r %r', oid, p_obj.ob_refcnt - 1)
         with self.transaction():
             # XXX also need to remove oid from resurrect and persist caches
-            self.snapshot_range(p_obj, ffi.sizeof('PObject'))
+            self.snapshot_range(ffi.addressof(p_obj, 'ob_refcnt'),
+                                ffi.sizeof('size_t'))
             assert p_obj.ob_refcnt > 0
             p_obj.ob_refcnt -= 1
             if p_obj.ob_refcnt < 1:

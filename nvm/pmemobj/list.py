@@ -58,8 +58,10 @@ class PersistentList(abc.MutableSequence):
         if (allocated >= newsize and newsize >= allocated >> 1):
             assert self._items != None or newsize == 0
             with mm.transaction():
-                mm.snapshot_range(self._body, ffi.sizeof('PVarObject'))
-                ffi.cast('PVarObject *', self._body).ob_size = newsize
+                ob = ffi.cast('PVarObject *', self._body)
+                mm.snapshot_range(ffi.addressof(ob, 'ob_size'),
+                                  ffi.sizeof('size_t'))
+                ob.ob_size = newsize
             return
         # We use CPython's overallocation algorithm.
         new_allocated = (newsize >> 3) + (3 if newsize < 9 else 6) + newsize
