@@ -2,14 +2,13 @@ import collections
 
 from .compat import recursive_repr, abc
 
-from _pmem import lib, ffi    # XXX refactor to make this import unneeded
+from _pmem import ffi    # XXX refactor to make this import unneeded
 
 
 class PersistentList(abc.MutableSequence):
     """Persistent version of the 'list' type."""
 
     # XXX locking!
-    # XXX tp_del method (see decref)
     # XXX All bookkeeping attrs should be _v_xxxx so that all other attrs
     #     (other than __manager__) can be made persistent.
 
