@@ -241,7 +241,7 @@ class MemoryManager(object):
         oid = self.otuple(oid)
         return _check_null(lib.pmemobj_direct(oid))
 
-    def protect_range(self, ptr, size):
+    def snapshot_range(self, ptr, size):
         lib.pmemobj_tx_add_range_direct(ptr, size)
 
     #
@@ -420,7 +420,7 @@ class MemoryManager(object):
         p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('incref %r %r', oid, p_obj.ob_refcnt + 1)
         with self:
-            self.protect_range(p_obj, ffi.sizeof('PObject'))
+            self.snapshot_range(p_obj, ffi.sizeof('PObject'))
             p_obj.ob_refcnt += 1
 
     def decref(self, oid):
@@ -430,7 +430,7 @@ class MemoryManager(object):
         log.debug('decref %r %r', oid, p_obj.ob_refcnt - 1)
         with self:
             # XXX also need to remove oid from resurrect and persist caches
-            self.protect_range(p_obj, ffi.sizeof('PObject'))
+            self.snapshot_range(p_obj, ffi.sizeof('PObject'))
             assert p_obj.ob_refcnt > 0
             p_obj.ob_refcnt -= 1
             if p_obj.ob_refcnt < 1:
@@ -514,7 +514,7 @@ class PersistentObjectPool(object):
             pmem_root = lib.pmemobj_root(self._pool_ptr, ffi.sizeof('PRoot'))
             pmem_root = ffi.cast('PRoot *', mm.direct(pmem_root))
             type_table_oid = mm._create_type_table()
-            mm.protect_range(pmem_root, ffi.sizeof('PRoot'))
+            mm.snapshot_range(pmem_root, ffi.sizeof('PRoot'))
             pmem_root.type_table = type_table_oid
             self._pmem_root = pmem_root
 
@@ -586,7 +586,7 @@ class PersistentObjectPool(object):
         log.debug("setting 'root' to %r", value)
         with self, self.lock:
             oid = self.mm.persist(value)
-            self.mm.protect_range(
+            self.mm.snapshot_range(
                 ffi.addressof(self._pmem_root.root_object),
                 ffi.sizeof('PObjPtr'))
             self.mm.xdecref(self._pmem_root.root_object)

@@ -57,7 +57,7 @@ class PersistentList(abc.MutableSequence):
         if (allocated >= newsize and newsize >= allocated >> 1):
             assert self._items != None or newsize == 0
             with self.__manager__ as mm:
-                mm.protect_range(self._body, ffi.sizeof('PVarObject'))
+                mm.snapshot_range(self._body, ffi.sizeof('PVarObject'))
                 ffi.cast('PVarObject *', self._body).ob_size = newsize
             return
         # We use CPython's overallocation algorithm.
@@ -70,7 +70,7 @@ class PersistentList(abc.MutableSequence):
                 items = mm.malloc_ptrs(new_allocated)
             else:
                 items = mm.realloc_ptrs(self._body.ob_items, new_allocated)
-            mm.protect_range(self._body, ffi.sizeof('PListObject'))
+            mm.snapshot_range(self._body, ffi.sizeof('PListObject'))
             self._body.ob_items = items
             self._body.allocated = new_allocated
             ffi.cast('PVarObject *', self._body).ob_size = newsize
@@ -87,8 +87,8 @@ class PersistentList(abc.MutableSequence):
             if index > size:
                 index = size
             items = self._items
-            mm.protect_range(items + index,
-                                    ffi.offsetof('PObjPtr *', newsize))
+            mm.snapshot_range(items + index,
+                              ffi.offsetof('PObjPtr *', newsize))
             for i in range(size, index, -1):
                 items[i] = items[i-1]
             v_oid = mm.persist(value)
@@ -113,8 +113,8 @@ class PersistentList(abc.MutableSequence):
         items = self._items
         with self.__manager__ as mm:
             v_oid = mm.persist(value)
-            mm.protect_range(ffi.addressof(items, index),
-                                    ffi.sizeof('PObjPtr *'))
+            mm.snapshot_range(ffi.addressof(items, index),
+                              ffi.sizeof('PObjPtr *'))
             mm.xdecref(items[index])
             items[index] = v_oid
             mm.incref(v_oid)
@@ -125,8 +125,8 @@ class PersistentList(abc.MutableSequence):
         newsize = size - 1
         items = self._items
         with self.__manager__ as mm:
-            mm.protect_range(ffi.addressof(items, index),
-                                    ffi.offsetof('PObjPtr *', size))
+            mm.snapshot_range(ffi.addressof(items, index),
+                              ffi.offsetof('PObjPtr *', size))
             mm.decref(items[index])
             for i in range(index, newsize):
                 items[i] = items[i+1]
