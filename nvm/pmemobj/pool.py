@@ -519,10 +519,6 @@ class PersistentObjectPool(object):
             self._pmem_root = pmem_root
 
     def _open(self, filename):
-        # I don't think pmemobj_root being inside the transaction makes it
-        # atomic, we aren't using pmemobj_root_construct, so we need to check
-        # for errors in that first root creation step.  If the type table
-        # pointer is non-zero we know initialization was complete.
         self._pool_ptr = _check_null(lib.pmemobj_open(_coerce_fn(filename),
                                                       layout_version))
         mm = self.mm = MemoryManager(self._pool_ptr)
@@ -530,9 +526,14 @@ class PersistentObjectPool(object):
         if size:
             pmem_root = mm.direct(lib.pmemobj_root(self._pool_ptr, 0))
             pmem_root = ffi.cast('PRoot *', pmem_root)
-        # I'm not sure the check for pmem_root not NULL is needed.
+        # pmemobj_root being inside a transaction does not make it atomic; we
+        # aren't using pmemobj_root_construct.  So we need to check whether or
+        # not initialization completed.  Since the type_table will be non-zero
+        # if and only if it did, we'll use that as our initialization flag.
+        # XXX I'm not sure the check for pmem_root not NULL is needed.
         if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
-            raise RuntimeError("Pool {} not initialized completely".format(
+            raise RuntimeError("Pool {} not initialized completely; delete"
+                               "the file and try again".format(
                 self.filename))
         self._pmem_root = pmem_root
         mm._resurrect_type_table(pmem_root.type_table)
