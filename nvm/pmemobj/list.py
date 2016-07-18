@@ -17,7 +17,7 @@ class PersistentList(abc.MutableSequence):
             raise ValueError("__manager__ is required")
         mm = self.__manager__ = kw.pop('__manager__')
         if '_oid' not in kw:
-            with mm:
+            with mm.transaction():
                 # XXX Will want to implement a freelist here, like CPython
                 self._oid = mm.malloc(ffi.sizeof('PListObject'))
                 ob = ffi.cast('PObject *', mm.direct(self._oid))
@@ -52,11 +52,12 @@ class PersistentList(abc.MutableSequence):
         return ffi.cast('PObjPtr *', mm.direct(ob_items))
 
     def _resize(self, newsize):
+        mm = self.__manager__
         allocated = self._allocated
         # Only realloc if we don't have enough space already.
         if (allocated >= newsize and newsize >= allocated >> 1):
             assert self._items != None or newsize == 0
-            with self.__manager__ as mm:
+            with mm.transaction():
                 mm.snapshot_range(self._body, ffi.sizeof('PVarObject'))
                 ffi.cast('PVarObject *', self._body).ob_size = newsize
             return
@@ -65,7 +66,7 @@ class PersistentList(abc.MutableSequence):
         if newsize == 0:
             new_allocated = 0
         items = self._items
-        with self.__manager__ as mm:
+        with mm.transaction():
             if items is None:
                 items = mm.malloc_ptrs(new_allocated)
             else:
@@ -76,9 +77,10 @@ class PersistentList(abc.MutableSequence):
             ffi.cast('PVarObject *', self._body).ob_size = newsize
 
     def insert(self, index, value):
-        with self.__manager__ as mm:
-            size = self._size
-            newsize = size + 1
+        mm = self.__manager__
+        size = self._size
+        newsize = size + 1
+        with mm.transaction():
             self._resize(newsize)
             if index < 0:
                 index += size
@@ -109,9 +111,10 @@ class PersistentList(abc.MutableSequence):
         return index
 
     def __setitem__(self, index, value):
+        mm = self.__manager__
         index = self._normalize_index(index)
         items = self._items
-        with self.__manager__ as mm:
+        with mm.transaction():
             v_oid = mm.persist(value)
             mm.snapshot_range(ffi.addressof(items, index),
                               ffi.sizeof('PObjPtr *'))
@@ -120,11 +123,12 @@ class PersistentList(abc.MutableSequence):
             mm.incref(v_oid)
 
     def __delitem__(self, index):
+        mm = self.__manager__
         index = self._normalize_index(index)
         size = self._size
         newsize = size - 1
         items = self._items
-        with self.__manager__ as mm:
+        with mm.transaction():
             mm.snapshot_range(ffi.addressof(items, index),
                               ffi.offsetof('PObjPtr *', size))
             mm.decref(items[index])
@@ -164,10 +168,11 @@ class PersistentList(abc.MutableSequence):
         return True
 
     def clear(self):
+        mm = self.__manager__
         if self._size == 0:
             return
         items = self._items
-        with self.__manager__ as mm:
+        with mm.transaction():
             for i in range(self._size):
                 # Grab oid in tuple form so the assignment can't change it
                 oid = mm.otuple(items[i])

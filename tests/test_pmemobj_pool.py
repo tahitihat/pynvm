@@ -63,10 +63,10 @@ class TestPersistentObjectPool(TestCase):
         pop = pmemobj.create(fn)
         self.addCleanup(pop.close)
         def tester():
-            with pop:
+            with pop.transaction():
                 pop.root = 10
                 raise Exception('boo')
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(Exception, 'boo'):
             tester()
         self.assertEqual(pop.root, None)
 

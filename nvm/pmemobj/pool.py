@@ -130,27 +130,33 @@ def _find_class_from_string(cls_string):
     return res
 
 
-class MemoryManager(object):
-    """Manage a PersistentObjectPool's memory.
+class _Transaction(object):
 
-    This is the API to use when making a Persistent class with its own storage
-    layout.
-    """
+    def __init__(self, pool_ptr):
+        self.pool_ptr = pool_ptr
 
-    # XXX create should be a keyword-only arg but we don't have those in 2.7.
-    def __init__(self, pool_ptr, type_table=None):
-        log.debug('MemoryManager.__init__: %r', pool_ptr)
-        self._pool_ptr = pool_ptr
-        self._init_caches()
-        self._track_free = None
+    def begin(self):
+        """Start a new (sub)transaction."""
+        log.debug('start_transaction')
+        _check_errno(
+            lib.pmemobj_tx_begin(self.pool_ptr, ffi.NULL, ffi.NULL))
 
-    #
-    # Transaction management
-    #
+    def commit(self):
+        """Commit the current (sub)transaction."""
+        log.debug('commit_transaction')
+        lib.pmemobj_tx_commit()
+        _check_errno(lib.pmemobj_tx_end())
+
+    def abort(self, errno=0):
+        """Abort the current (sub)transaction."""
+        log.debug('abort_transaction')
+        lib.pmemobj_tx_abort(errno)
+        if lib.pmemobj_tx_end() not in (0, errno.ECANCELED):
+            _raise_per_errno()
 
     def __enter__(self):
         #log.debug('__enter__')
-        _check_errno(lib.pmemobj_tx_begin(self._pool_ptr, ffi.NULL, ffi.NULL))
+        _check_errno(lib.pmemobj_tx_begin(self.pool_ptr, ffi.NULL, ffi.NULL))
         return self
 
     def __exit__(self, *args):
@@ -171,6 +177,26 @@ class MemoryManager(object):
         err = lib.pmemobj_tx_end()
         if err and not (err == errno.ECANCELED and args[0] is not None):
             _raise_per_errno()
+
+
+
+class MemoryManager(object):
+    """Manage a PersistentObjectPool's memory.
+
+    This is the API to use when making a Persistent class with its own storage
+    layout.
+    """
+
+    # XXX create should be a keyword-only arg but we don't have those in 2.7.
+    def __init__(self, pool_ptr, type_table=None):
+        log.debug('MemoryManager.__init__: %r', pool_ptr)
+        self._pool_ptr = pool_ptr
+        self._init_caches()
+        self._track_free = None
+
+    def transaction(self):
+        """Return a (context manager) object that represents a transaction."""
+        return _Transaction(self._pool_ptr)
 
     #
     # Memory management
@@ -271,7 +297,7 @@ class MemoryManager(object):
         This is a private method for coordination between the
         PersistentObjectPool and the MemoryManager.
         """
-        with self:
+        with self.transaction():
             # Pre-fill first two elements; they are handled as special cases.
             type_table = PersistentList(
                 [_class_string(PersistentList), _class_string(str)],
@@ -366,7 +392,7 @@ class MemoryManager(object):
         type_code = self._get_type_code(s.__class__)
         if sys.version_info[0] > 2:
             s = s.encode('utf-8')
-        with self:
+        with self.transaction():
             p_str_oid = self.malloc(ffi.sizeof('PObject') + len(s) + 1)
             p_str = ffi.cast('PObject *', self.direct(p_str_oid))
             p_str.ob_type = type_code
@@ -383,7 +409,7 @@ class MemoryManager(object):
 
     def _persist_builtins_float(self, f):
         type_code = self._get_type_code(f.__class__)
-        with self:
+        with self.transaction():
             p_float_oid = self.malloc(ffi.sizeof('PFloatObject'))
             p_float = ffi.cast('PObject *', self.direct(p_float_oid))
             p_float.ob_type = type_code
@@ -402,7 +428,7 @@ class MemoryManager(object):
         i = repr(i)
         if sys.version_info[0] < 3:
             i = i.rstrip('L')
-        with self:
+        with self.transaction():
             # There's a bit of extra overhead in reusing this, but not much.
             p_int_oid = self._persist_builtins_str(i)
             p_int = ffi.cast('PObject *', self.direct(p_int_oid))
@@ -419,7 +445,7 @@ class MemoryManager(object):
         oid = self.otuple(oid)
         p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('incref %r %r', oid, p_obj.ob_refcnt + 1)
-        with self:
+        with self.transaction():
             self.snapshot_range(p_obj, ffi.sizeof('PObject'))
             p_obj.ob_refcnt += 1
 
@@ -428,7 +454,7 @@ class MemoryManager(object):
         oid = self.otuple(oid)
         p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('decref %r %r', oid, p_obj.ob_refcnt - 1)
-        with self:
+        with self.transaction():
             # XXX also need to remove oid from resurrect and persist caches
             self.snapshot_range(p_obj, ffi.sizeof('PObject'))
             assert p_obj.ob_refcnt > 0
@@ -444,7 +470,7 @@ class MemoryManager(object):
     def _deallocate(self, oid):
         """Deallocate the memory occupied by oid."""
         log.debug("deallocating %s", oid)
-        with self:
+        with self.transaction():
             # XXX could have a type cache so we don't have to resurrect here.
             obj = self.resurrect(oid)
             if hasattr(obj, '_deallocate'):
@@ -510,7 +536,7 @@ class PersistentObjectPool(object):
                                                         layout_version,
                                                         pool_size, mode))
         mm = self.mm = MemoryManager(self._pool_ptr)
-        with self as mm:
+        with mm.transaction():
             pmem_root = lib.pmemobj_root(self._pool_ptr, ffi.sizeof('PRoot'))
             pmem_root = ffi.cast('PRoot *', mm.direct(pmem_root))
             type_table_oid = mm._create_type_table()
@@ -570,6 +596,9 @@ class PersistentObjectPool(object):
             # libpmemobj open failed, nothing to do.
             pass
 
+    def transaction(self):
+        """Return a (context manager) object that represents a transaction."""
+        return self.mm.transaction()
 
     @property
     def root(self):
@@ -585,7 +614,7 @@ class PersistentObjectPool(object):
     @root.setter
     def root(self, value):
         log.debug("setting 'root' to %r", value)
-        with self, self.lock:
+        with self.mm.transaction(), self.lock:
             oid = self.mm.persist(value)
             self.mm.snapshot_range(
                 ffi.addressof(self._pmem_root.root_object),
@@ -594,32 +623,11 @@ class PersistentObjectPool(object):
             self._pmem_root.root_object = oid
             self.mm.incref(oid)
 
-    def begin_transaction(self):
-        """Start a new (sub)transaction."""
-        log.debug('start_transaction')
-        _check_errno(
-            lib.pmemobj_tx_begin(self._pool_ptr, ffi.NULL, ffi.NULL))
-
-    def commit_transaction(self):
-        """Commit the current (sub)transaction."""
-        log.debug('commit_transaction')
-        lib.pmemobj_tx_commit()
-        _check_errno(lib.pmemobj_tx_end())
-
-    def abort_transaction(self, errno=0):
-        """Abort the current (sub)transaction."""
-        log.debug('abort_transaction')
-        lib.pmemobj_tx_abort(errno)
-        if lib.pmemobj_tx_end() not in (0, errno.ECANCELED):
-            _raise_per_errno()
-
     def __enter__(self):
-        """Begin a transaction context, optionally return the memory manager."""
-        return self.mm.__enter__()
+        return self
 
     def __exit__(self, *args, **kw):
-        """End the current transaction context."""
-        self.mm.__exit__(*args, **kw)
+        self.close()
 
     def new(self, typ, *args, **kw):
         """Create a new instance of typ using args and kw, managed by this pool.
@@ -744,7 +752,7 @@ class PersistentObjectPool(object):
                 if debug:
                     log.debug('gc: deallocating container %s %r',
                               oid, self.mm.resurrect(oid))
-                with self:
+                with self.mm.transaction():
                     # incref so we don't try to deallocate us during cycle clear.
                     self.mm.incref(oid)
                     self.mm._deallocate(oid)

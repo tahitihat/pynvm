@@ -22,6 +22,9 @@ class TestCase(unittest.TestCase):
         self.addCleanup(lambda: os.remove(fn) if os.path.exists(fn) else None)
         return fn
 
+    if sys.version_info[0] < 3:
+        assertRaisesRegex = unittest.TestCase.assertRaisesRegexp
+
 
 def parameterize(cls):
     """A test method parameterization class decorator.
