@@ -167,10 +167,9 @@ class MemoryManager(object):
                 # We have a Python exception that didn't result from an error
                 # in the pmemobj library, so manually roll back the transaction
                 # since the python block won't complete.
-                # XXX we should maybe use a unique error code here and raise an
-                # error on ECANCELED, I'm not sure.
-                lib.pmemobj_tx_abort(0)
-        if lib.pmemobj_tx_end() not in (0, errno.ECANCELED):
+                lib.pmemobj_tx_abort(errno.ECANCELED)
+        err = lib.pmemobj_tx_end()
+        if err and not (err == errno.ECANCELED and args[0] is not None):
             _raise_per_errno()
 
     #
