@@ -11,7 +11,8 @@ from threading import RLock
 from _pmem import lib, ffi
 from .list import PersistentList
 
-log = logging.getLogger('pynvm.pmemobj')
+log = logging.getLogger('nvm.pmemobj')
+tlog = logging.getLogger('nvm.pmemobj.trace')
 
 # If we ever need to change how we make use of the persistent store, having a
 # version as the layout will allow us to provide backward compatibility.
@@ -20,7 +21,7 @@ layout_version = 'pypmemobj-{}.{}.{}'.format(*layout_info).encode()
 
 MIN_POOL_SIZE = lib.PMEMOBJ_MIN_POOL
 MAX_OBJ_SIZE = lib.PMEMOBJ_MAX_ALLOC_SIZE
-OID_NULL = lib.OID_NULL
+OID_NULL = (lib.OID_NULL.pool_uuid_lo, lib.OID_NULL.off)
 # Arbitrary numbers.
 POBJECT_TYPE_NUM = 20
 POBJPTR_ARRAY_TYPE_NUM = 21
@@ -130,54 +131,175 @@ def _find_class_from_string(cls_string):
     return res
 
 
+class _ObjCache(object):
+
+    def __init__(self):
+        # XXX WeakValueDictionary?
+        self._resurrect = {}
+        self._persist = {}
+        self._trans_resurrect = {}
+        self._trans_persist = {}
+
+    def pkey(self, obj):
+        # Use the object as the key if it is immutable (hashable) because we
+        # only need to persist one equivalent copy.  For mutables use the
+        # object id, since we must persist each instance even if they are
+        # otherwise equal.
+        return obj if getattr(obj, '__hash__', None) else id(obj)
+
+    def clear(self):
+        self._resurrect.clear()
+        # XXX I'm not sure we can get away with mapping OID_NULL
+        # to None here, but try it and see.
+        self._resurrect[OID_NULL] = None
+        self._persist.clear()
+        self.clear_transaction_cache()
+
+    def clear_transaction_cache(self):
+        tlog.debug("clearing transaction cache: %s", self._trans_resurrect)
+        self._trans_resurrect.clear()
+        self._trans_persist.clear()
+
+    def obj_from_oid(self, oid):
+        """Return object cached for oid, or raise KeyError."""
+        try:
+            obj = self._trans_resurrect[oid]
+            tlog.debug('found in transaction cache: %r %r', oid, obj)
+            return obj
+        except KeyError:
+            pass
+        obj = self._resurrect[oid]
+        tlog.debug('found in cache: %r %r', oid, obj)
+        return obj
+
+    def oid_from_obj(self, obj):
+        """Return oid cached for obj, or raise KeyError."""
+        key = self.pkey(obj)
+        try:
+            oid = self._trans_persist[key]
+            tlog.debug('found in transaction cache: %r %r', oid, obj)
+            return oid
+        except KeyError:
+            pass
+        oid = self._persist[key]
+        tlog.debug('found in cache: %r %r (key %r)', oid, obj, key)
+        return oid
+
+    def cache(self, oid, obj, in_transaction=False):
+        key = self.pkey(obj)
+        tlog.debug('caching (in_trasaction=%s) %r %r (key %r)',
+                   in_transaction, oid, obj, key)
+        if in_transaction:
+            self._trans_resurrect[oid] = obj
+            self._trans_persist[key] = oid
+        else:
+            self._resurrect[oid] = obj
+            self._persist[key] = oid
+
+    def cache_transactionally(self, oid, obj):
+        self.cache(oid, obj, in_transaction=True)
+
+    def commit_transaction_cache(self):
+        tlog.debug('committing transaction cache %s', self._trans_resurrect)
+        self._resurrect.update(self._trans_resurrect)
+        self._trans_resurrect.clear()
+        self._persist.update(self._trans_persist)
+        self._trans_persist.clear()
+
+    def purge(self, oid):
+        if oid in self._trans_resurrect:
+            obj = self._trans_resurrect[oid]
+            tlog.debug('purging %s %s from transaction caches', oid, obj)
+            del self._trans_resurrect[oid]
+            del self._trans_persist[self.pkey(obj)]
+        elif oid in self._resurrect:
+            obj = self._resurrect[oid]
+            tlog.debug('purging %s %s from caches', oid, obj)
+            del self._resurrect[oid]
+            del self._persist[self.pkey(obj)]
+        else:
+            tlog.debug('not in cache: %r', oid)
+
+
 class _Transaction(object):
 
-    def __init__(self, pool_ptr):
+    _FREE = 'F'
+    _CONTEXT = 'C'
+
+    def __init__(self, pool_ptr, obj_cache):
         self.pool_ptr = pool_ptr
+        self._obj_cache = obj_cache
+        self._trans_stack = []
+
+    @property
+    def depth(self):
+        return len(self._trans_stack)
+
+    def _context_abort(self, msg):
+        lib.pmemobj_tx_abort(errno.ECANCELED)
+        raise RuntimeError('Transaction aborted: ' + msg)
 
     def begin(self):
         """Start a new (sub)transaction."""
-        log.debug('start_transaction')
+        tlog.debug('start_transaction %s', self._trans_stack)
         _check_errno(
             lib.pmemobj_tx_begin(self.pool_ptr, ffi.NULL, ffi.NULL))
+        self._trans_stack.append(self._FREE)
 
     def commit(self):
         """Commit the current (sub)transaction."""
-        log.debug('commit_transaction')
+        tlog.debug('commit_transaction %s', self._trans_stack)
+        if not self._trans_stack:
+            raise RuntimeError("commit called outside of transaction")
+        if self._trans_stack[-1] != self._FREE:
+            self._context_abort("Non-context commit inside a context")
+        self._trans_stack.pop()
         lib.pmemobj_tx_commit()
         _check_errno(lib.pmemobj_tx_end())
 
-    def abort(self, errno=0):
+    def abort(self, errno=errno.ECANCELED):
         """Abort the current (sub)transaction."""
-        log.debug('abort_transaction')
+        tlog.debug('abort_transaction: %s %s', errno, self._trans_stack)
+        if not self._trans_stack:
+            raise RuntimeError("abort called outside of transaction")
         lib.pmemobj_tx_abort(errno)
-        if lib.pmemobj_tx_end() not in (0, errno.ECANCELED):
-            _raise_per_errno()
+        self._obj_cache.clear_transaction_cache()
+        if self._trans_stack[-1] == self._FREE:
+            self._trans_stack.pop()
+            # This will raise ECANCELED.
+            _check_errno(lib.pmemobj_tx_end())
 
     def __enter__(self):
-        #log.debug('__enter__')
+        self._trans_stack.append(self._CONTEXT)
+        tlog.debug('__enter__ %s', self._trans_stack)
         _check_errno(lib.pmemobj_tx_begin(self.pool_ptr, ffi.NULL, ffi.NULL))
         return self
 
     def __exit__(self, *args):
+        tlog.debug('__exit__: %s, %s', self._trans_stack, args)
+        if self._trans_stack.pop() == self._FREE:
+            while self._trans_stack.pop() == self._FREE:
+                lib.pmemobj_tx_end()
+            self._context_abort("Non-context transaction open at context end.")
         stage = lib.pmemobj_tx_stage()
-        #log.debug('__exit__: %s', args)
         if stage == lib.TX_STAGE_WORK:
             if args[0] is None:
-                #log.debug('committing')
-                # If this fails we get a non-zero errno from tx_end and
-                # _end_transaction will raise it.
+                tlog.debug('committing')
+                # If this fails we get a non-zero errno from tx_end.
                 lib.pmemobj_tx_commit()
             else:
-                #log.debug('aborting')
+                log.debug('aborting: %r', args[1])
                 # We have a Python exception that didn't result from an error
                 # in the pmemobj library, so manually roll back the transaction
-                # since the python block won't complete.
+                # since the python block won't have completed.
                 lib.pmemobj_tx_abort(errno.ECANCELED)
         err = lib.pmemobj_tx_end()
-        if err and not (err == errno.ECANCELED and args[0] is not None):
-            _raise_per_errno()
-
+        if err:
+            self._obj_cache.clear_transaction_cache()
+            if err != errno.ECANCELED or args[0] is None:
+                _raise_per_errno()
+        elif not self._trans_stack:
+            self._obj_cache.commit_transaction_cache()
 
 
 class MemoryManager(object):
@@ -191,12 +313,14 @@ class MemoryManager(object):
     def __init__(self, pool_ptr, type_table=None):
         log.debug('MemoryManager.__init__: %r', pool_ptr)
         self._pool_ptr = pool_ptr
-        self._init_caches()
         self._track_free = None
+        self._obj_cache = _ObjCache()
+        self._transaction = _Transaction(self._pool_ptr, self._obj_cache)
+        self._init_caches()
 
     def transaction(self):
         """Return a (context manager) object that represents a transaction."""
-        return _Transaction(self._pool_ptr)
+        return self._transaction
 
     #
     # Memory management
@@ -219,7 +343,7 @@ class MemoryManager(object):
         oid = self.otuple(lib.pmemobj_tx_zalloc(size, type_num))
         if oid == self.OID_NULL:
             _raise_per_errno()
-        log.debug('oid: %s', oid)
+        log.debug('malloced oid: %s', oid)
         return oid
 
     def malloc_ptrs(self, count):
@@ -261,6 +385,7 @@ class MemoryManager(object):
         oid = self.otuple(oid)
         log.debug('free: %r', oid)
         _check_errno(lib.pmemobj_tx_free(oid))
+        self._obj_cache.purge(oid)
 
     def direct(self, oid):
         """Return the real memory address where oid lives."""
@@ -268,6 +393,7 @@ class MemoryManager(object):
         return _check_null(lib.pmemobj_direct(oid))
 
     def snapshot_range(self, ptr, size):
+        tlog.debug('snapshot %s %s', ptr, size)
         lib.pmemobj_tx_add_range_direct(ptr, size)
 
     #
@@ -277,11 +403,7 @@ class MemoryManager(object):
     def _init_caches(self):
         # We have a couple of special cases to avoid infinite regress.
         self._type_code_cache = {PersistentList: 0, str: 1}
-        self._persist_cache = {}
-        # XXX WeakValueDictionary?
-        # XXX I'm not sure we can get away with mapping OID_NULL
-        # to None here, but try it and see.
-        self._resurrect_cache = {self.otuple(OID_NULL): None}
+        self._obj_cache.clear()
 
     def _resurrect_type_table(self, oid):
         """Resurrect the type table from oid.
@@ -303,7 +425,7 @@ class MemoryManager(object):
                 [_class_string(PersistentList), _class_string(str)],
                 __manager__=self)
             self.incref(type_table._oid)
-            self._resurrect_cache[type_table._oid] = type_table
+            self._obj_cache.cache_transactionally(type_table._oid, type_table)
         self._type_table = type_table
         return type_table._oid
 
@@ -330,45 +452,40 @@ class MemoryManager(object):
 
     def persist(self, obj):
         """Store obj in persistent memory and return its oid."""
-        key = obj if getattr(obj, '__hash__', None) else id(obj)
-        log.debug('persist: %r (key %r)', obj, key)
+        log.debug('persist: %r', obj)
         try:
-            return self._persist_cache[key]
+            return self._obj_cache.oid_from_obj(obj)
         except KeyError:
             pass
         if hasattr(obj, '__manager__'):
+            tlog.debug('Persistent object: %s %s', obj._oid, obj)
+            self._obj_cache.cache(obj._oid, obj)
             return obj._oid
         cls_str = _class_string(obj.__class__)
         persister = '_persist_' + cls_str.replace(':', '_')
         if not hasattr(self, persister):
             raise TypeError("Don't know how to persist {!r}".format(cls_str))
         oid = getattr(self, persister)(obj)
-        # This oid should always come from a malloc, and thus be a tuple,
-        # and so the correct value to use as a key without calling _as_tuple.
-        self._persist_cache[key] = oid
-        self._resurrect_cache[oid] = obj
+        self._obj_cache.cache(oid, obj, in_transaction=self._transaction.depth)
         log.debug('new %s object: %r', cls_str, oid)
         return oid
 
     def resurrect(self, oid):
         """Return python object representing the data stored at oid."""
         oid = self.otuple(oid)
-        # XXX need multiple debug levels
-        #log.debug('resurrect: %r', oid)
+        tlog.debug('resurrect: %r', oid)
         try:
-            obj = self._resurrect_cache[oid]
-            #log.debug('resurrected from cache: %r', obj)
-            return obj
+            return self._obj_cache.obj_from_oid(oid)
         except KeyError:
             pass
         obj_ptr = ffi.cast('PObject *', self.direct(oid))
         type_code = obj_ptr.ob_type
         # The special cases are to avoid infinite regress in the type table.
         if type_code == 0:
-            res = PersistentList(__manager__=self, _oid=oid)
-            self._resurrect_cache[oid] = res
-            log.debug('resurrect PersistentList: %s %r', oid, res)
-            return res
+            obj = PersistentList(__manager__=self, _oid=oid)
+            self._obj_cache.cache(oid, obj)
+            log.debug('resurrect PersistentList: %s %r', oid, obj)
+            return obj
         if type_code == 1:
             cls_str = 'builtins:str'
         else:
@@ -381,12 +498,11 @@ class MemoryManager(object):
             log.debug('resurrect %r: persistent type (%r): %r',
                       oid, cls_str, res)
             return res
-        res = getattr(self, resurrector)(obj_ptr)
-        self._resurrect_cache[oid] = res
-        self._persist_cache[res] = oid
+        obj = getattr(self, resurrector)(obj_ptr)
+        self._obj_cache.cache(oid, obj)
         log.debug('resurrect %r: immutable type (%r): %r',
-                  oid, resurrector, res)
-        return res
+                  oid, resurrector, obj)
+        return obj
 
     def _persist_builtins_str(self, s):
         type_code = self._get_type_code(s.__class__)
@@ -456,7 +572,6 @@ class MemoryManager(object):
         p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('decref %r %r', oid, p_obj.ob_refcnt - 1)
         with self.transaction():
-            # XXX also need to remove oid from resurrect and persist caches
             self.snapshot_range(ffi.addressof(p_obj, 'ob_refcnt'),
                                 ffi.sizeof('size_t'))
             assert p_obj.ob_refcnt > 0
@@ -500,7 +615,7 @@ class MemoryManager(object):
             return oid
         return (oid.pool_uuid_lo, oid.off)
 
-    OID_NULL = (lib.OID_NULL.pool_uuid_lo, lib.OID_NULL.off)
+    OID_NULL = OID_NULL
 
 
 class PersistentObjectPool(object):
@@ -615,7 +730,7 @@ class PersistentObjectPool(object):
 
     @root.setter
     def root(self, value):
-        log.debug("setting 'root' to %r", value)
+        log.debug("setting 'root' to %r (discarding %s)", value, self.root)
         with self.mm.transaction(), self.lock:
             oid = self.mm.persist(value)
             self.mm.snapshot_range(
@@ -642,6 +757,8 @@ class PersistentObjectPool(object):
 
     # If I didn't have to support python2 I'd make debug keyword only.
     def gc(self, debug=False):
+        # XXX add debug flag to constructor, and a test that orphans
+        # generate warning messages when debug=True.
         """Free all unreferenced objects (cyclic garbage).
 
         The object tree is traced from the root, and any object that is not
@@ -699,6 +816,8 @@ class PersistentObjectPool(object):
                             log.debug('gc: other: %s %s %r',
                                       oid, obj.ob_refcnt, self.mm.resurrect(oid))
                         other.add(oid)
+                else:
+                    log.debug("gc: non PObject: %s", oid)
                 oid = self.mm.otuple(lib.pmemobj_next(oid))
             gc_counts['containers-total'] = len(containers)
             gc_counts['other-total'] = len(other)
@@ -723,7 +842,7 @@ class PersistentObjectPool(object):
                 live.append(root_oid)
             elif root is not None:
                 if debug:
-                    log.debug('gc: non-container root: %s %r', oid, root)
+                    log.debug('gc: non-container root: %s %r', root_oid, root)
                 other.remove(root_oid)
             for oid in live:
                 if debug:

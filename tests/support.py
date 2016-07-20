@@ -1,4 +1,7 @@
 import collections
+import errno
+if not hasattr(errno, 'ECANCELED'):
+    errno.ECANCELED = 125  # 2.7 errno doesn't define this, so guess.
 import os
 import sys
 import unittest
@@ -11,7 +14,9 @@ if verbose > 1:
     import logging
     logging.basicConfig(
         level=logging.DEBUG,
-        format='%(asctime)s %(name)-15s %(levelname)-8s %(message)s')
+        format='%(asctime)s %(name)-20s %(levelname)-8s %(message)s')
+    if verbose < 3:
+        logging.getLogger('nvm.pmemobj.trace').setLevel(logging.WARNING)
 
 
 class TestCase(unittest.TestCase):

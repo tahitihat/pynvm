@@ -4,7 +4,7 @@ import unittest
 
 from nvm import pmemobj
 
-from tests.support import TestCase, parameterize
+from tests.support import TestCase, parameterize, errno
 
 
 class TestFoo(object):
@@ -57,18 +57,6 @@ class TestPersistentObjectPool(TestCase):
         pop.close()
         pop = pmemobj.open(fn)
         self.assertEqual(pop.root, test_list)
-
-    def test_transaction_abort_on_python_exception(self):
-        fn = self._test_fn()
-        pop = pmemobj.create(fn)
-        self.addCleanup(pop.close)
-        def tester():
-            with pop.transaction():
-                pop.root = 10
-                raise Exception('boo')
-        with self.assertRaisesRegex(Exception, 'boo'):
-            tester()
-        self.assertEqual(pop.root, None)
 
     def test_duplicate_close(self):
         fn = self._test_fn()
@@ -123,6 +111,139 @@ class TestSimpleImmutablePersistence(TestCase):
         pop = pmemobj.open(fn)
         self.assertEqual(pop.root, obj)
         pop.close()
+
+
+class TestTransactions(TestCase):
+
+    def _setup(self):
+        self.fn = self._test_fn()
+        pop = self.pop = pmemobj.create(self.fn)
+        self.addCleanup(lambda: self.pop.close())
+        return pop
+
+    def _reopen_pop(self):
+        self.pop.close()
+        pop = self.pop = pmemobj.open(self.fn)
+        return pop
+
+    def test_non_context_commit(self):
+        pop = self._setup()
+        trans = pop.transaction()
+        trans.begin()
+        pop.root = 10
+        trans.commit()
+        self.assertEqual(pop.root, 10)
+        pop = self._reopen_pop()
+        self.assertEqual(pop.root, 10)
+
+    def test_non_context_abort_raises_and_resets_state(self):
+        pop = self._setup()
+        # XXX what to do about the invalid message?
+        #with self.assertRaisesRegex(OSError, 'canceled'):
+        with self.assertRaises(OSError):
+            trans =  pop.transaction()
+            trans.begin()
+            pop.root = 10
+            trans.abort(errno.ECANCELED)
+        self.assertIsNone(pop.root)
+
+    def test_context(self):
+        # This just tests that no errors happen; it requires a crash
+        # or abort to prove that the transaction actually worked.
+        pop = self._setup()
+        with pop.transaction():
+            pop.root = 10
+        self.assertEqual(pop.root, 10)
+        pop = self._reopen_pop()
+        self.assertEqual(pop.root, 10)
+
+    def test_context_abort_raises_and_resets_state(self):
+        pop = self._setup()
+        #with self.assertRaisesRegex(OSError, 'canceled'):
+        with self.assertRaises(OSError):
+            with pop.transaction() as trans:
+                pop.root = 10
+                trans.abort(errno.ECANCELED)
+        self.assertIsNone(pop.root)
+        pop = self._reopen_pop()
+        self.assertIsNone(pop.root)
+        # Make sure transaction machinery is reset by doing another.
+        with pop.transaction() as trans:
+            pop.root = 10
+
+    def test_context_aborts_on_python_exception(self):
+        pop = self._setup()
+        with self.assertRaisesRegex(Exception, 'boo'):
+            with pop.transaction():
+                pop.root = 10
+                raise Exception('boo')
+        self.assertIsNone(pop.root)
+        with pop.transaction():
+            pop.root = 10
+
+    def test_non_context_commit_aborts_inside_context(self):
+        pop = self._setup()
+        with self.assertRaises(RuntimeError):
+            with pop.transaction() as trans:
+                pop.root = 10
+                trans.commit()
+        self.assertIsNone(pop.root)
+        with pop.transaction():
+            pop.root = 10
+
+    def xest_unclosed_non_context_transaction_in_context_aborts(self):
+        pop = self._setup()
+        with self.assertRaises(RuntimeError):
+            with pop.transaction() as trans:
+                pop.root = 10
+                trans.begin()
+        self.assertIsNone(pop.root)
+        with pop.transaction():
+            pop.root = 10
+
+    def test_abort_outside_transaction_raises(self):
+        pop = self._setup()
+        trans = pop.transaction()
+        with self.assertRaisesRegex(RuntimeError, 'abort.*outside.*trans'):
+            pop.root = 10
+            trans.abort()
+        self.assertEqual(pop.root, 10)
+
+    def test_commit_outside_transaction_raises(self):
+        pop = self._setup()
+        trans = pop.transaction()
+        with self.assertRaisesRegex(RuntimeError, 'commit.*outside.*trans'):
+            pop.root = 10
+            trans.commit()
+        self.assertEqual(pop.root, 10)
+
+    def test_abort_nested_transactions(self):
+        pop = self._setup()
+        with self.assertRaises(OSError):
+            with pop.transaction():
+                pop.root = 10
+                with pop.transaction():
+                    pop.root = 20
+                    with pop.transaction() as trans:
+                        pop.root = 30
+                        trans.abort()
+        self.assertIsNone(pop.root)
+        with pop.transaction():
+            pop.root = 10
+
+    def test_context_abort_nested_transactions(self):
+        pop = self._setup()
+        with self.assertRaises(RuntimeError):
+            with pop.transaction():
+                pop.root = 10
+                with pop.transaction():
+                    pop.root = 20
+                    with pop.transaction() as trans:
+                        pop.root = 30
+                        trans.commit()
+        self.assertIsNone(pop.root)
+        with pop.transaction():
+            pop.root = 10
 
 
 class TestGC(TestCase):
