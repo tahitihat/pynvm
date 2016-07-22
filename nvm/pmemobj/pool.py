@@ -148,11 +148,12 @@ class _ObjCache(object):
         return obj if getattr(obj, '__hash__', None) else id(obj)
 
     def clear(self):
-        self._resurrect.clear()
         # XXX I'm not sure we can get away with mapping OID_NULL
         # to None here, but try it and see.
+        self._resurrect.clear()
         self._resurrect[OID_NULL] = None
         self._persist.clear()
+        self._persist[None] = OID_NULL
         self.clear_transaction_cache()
 
     def clear_transaction_cache(self):
@@ -559,6 +560,9 @@ class MemoryManager(object):
     def incref(self, oid):
         """Increment the reference count of oid."""
         oid = self.otuple(oid)
+        if oid == OID_NULL:
+            # Unlike CPython, we don't ref-track our constants.
+            return
         p_obj = ffi.cast('PObject *', self.direct(oid))
         log.debug('incref %r %r', oid, p_obj.ob_refcnt + 1)
         with self.transaction():

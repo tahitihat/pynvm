@@ -97,7 +97,8 @@ class TestSimpleImmutablePersistence(TestCase):
     objs_params = dict(int=5,
                        float=10.5,
                        string='abcde',
-                       ustring='abő')
+                       ustring='abő',
+                       none=None)
     if sys.version_info[0] < 3:
         objs_params['long_int'] = sys.maxint * 2
 
