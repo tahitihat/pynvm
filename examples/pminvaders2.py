@@ -35,6 +35,10 @@ C_BULLET = 3
 C_STAR = 4
 C_INTRO = 5
 
+EVENT_PLAYER_KILLED = 0
+EVENT_ALIENS_KILLED = 1
+EVENT_BOUNCE = 2
+
 # When we have a working PersistentDict we can use namspaces instead of
 # this named-index hack.
 ROOT_STATE = 0
@@ -54,6 +58,9 @@ STATE_DY = 6
 
 PLAYER_X = 0
 PLAYER_TIMER = 1
+
+ALIEN_X = 0
+ALIEN_Y = 1
 
 STAR_X = 0
 STAR_Y = 1
@@ -111,6 +118,10 @@ class PMInvaders2(object):
         if pop.root[ROOT_PLAYER] is None:
             pop.root[ROOT_PLAYER] = self.pop.new(PersistentList,
                 [GAME_WIDTH // 2, 1])
+        if pop.root[ROOT_ALIENS] is None:
+            pop.root[ROOT_ALIENS] = self.pop.new(PersistentList)
+        if pop.root[ROOT_BULLETS] is None:
+            pop.root[ROOT_BULLETS] = self.pop.new(PersistentList)
         if pop.root[ROOT_STARS] is None:
             pop.root[ROOT_STARS] = self.pop.new(PersistentList)
         self.root = pop.root
@@ -205,11 +216,120 @@ class PMInvaders2(object):
             self.screen.refresh()
         return exit == q
 
+    def draw_score(self):
+        state = self.root[ROOT_STATE]
+        self.printw(1, 1, "Level: {:5} Score: {} | {}".format(
+                    state[STATE_LEVEL],
+                    state[STATE_SCORE],
+                    state[STATE_HIGH_SCORE]))
+
+    def remove_aliens(self):
+        self.root[ROOT_ALIENS].clear()
+
+    def create_aliens(self):
+        aliens = self.root[ROOT_ALIENS]
+        for x in range(ALIENS_COL):
+            for y in range(ALIENS_ROW):
+                aliens.append(self.pop.new(PersistentList,
+                              [GAME_WIDTH // 2 - ALIENS_COL + x * 2, y + 3]))
+
+    def new_level(self):
+        with self.pop.transaction():
+            self.remove_aliens()
+            self.create_aliens()
+            state = self.root[ROOT_STATE]
+            if state[STATE_NEW_LEVEL] > 0 or state[STATE_LEVEL] > 1:
+                state[STATE_LEVEL] += state[STATE_NEW_LEVEL]
+            state[STATE_NEW_LEVEL] = 0
+            state[STATE_DX] = 1
+            state[STATE_DY] = 0
+            state[STATE_TIMER] = MAX_ALIEN_TIMER - 100 * (state[STATE_LEVEL] - 1)
+
+    def update_score(self, delta):
+        state = self.root[ROOT_STATE]
+        if delta < 0 and not state[STATE_SCORE]:
+            return
+        state[STATE_SCORE] += delta
+        if state[STATE_SCORE] < 0:
+            state[STATE_SCORE] = 0
+        if state[STATE_SCORE] > state[STATE_HIGH_SCORE]:
+            state[STATE_HIGH_SCORE] = state[STATE_SCORE]
+
+    def move_aliens(self):
+        aliens = self.root[ROOT_ALIENS]
+        player = self.root[ROOT_PLAYER]
+        state = self.root[ROOT_STATE]
+        dx = state[STATE_DX]
+        dy = state[STATE_DY]
+        if not aliens:
+            return EVENT_ALIENS_KILLED
+        event = None
+        for alien in aliens:
+            if dy:
+                alien[ALIEN_Y] += dy
+            if dx:
+                alien[ALIEN_X] += dx
+            if alien[ALIEN_Y] >= PLAYER_Y:
+                event = EVENT_PLAYER_KILLED
+            elif (dy == 0
+                  and alien[ALIEN_X] >= GAME_WIDTH - 2
+                  or alien[ALIEN_X] <= 2):
+                event = EVENT_BOUNCE
+        return event
+
+    def process_aliens(self):
+        state = self.root[ROOT_STATE]
+        with self.pop.transaction():
+            state[STATE_TIMER] -= 1
+            if not state[STATE_TIMER]:
+                state[STATE_TIMER] = (MAX_ALIEN_TIMER - 50
+                                        * (state[STATE_LEVEL] - 1))
+                event = self.move_aliens()
+                if event == EVENT_ALIENS_KILLED:
+                    state[STATE_NEW_LEVEL] = 1
+                elif event == EVENT_PLAYER_KILLED:
+                    curses.flash()
+                    curses.beep()
+                    state[STATE_NEW_LEVEL] = -1
+                    self.update_score(-100)
+                elif event == EVENT_BOUNCE:
+                    state[STATE_DY] = 1
+                    state[STATE_DX] = -state[STATE_DX]
+                elif state[STATE_DY]:
+                    state[STATE_DY] = 0
+        for alien in self.root[ROOT_ALIENS]:
+            self.screen.addch(alien[ALIEN_Y], alien[ALIEN_X],
+                              curses.ACS_DIAMOND, curses.color_pair(C_ALIEN))
+
+    def process_bullets(self):
+        pass
+
+    def process_player(self, ch):
+        pass
+
+    def game_loop(self):
+        ch = None
+        q = ord('q')
+        state = self.root[ROOT_STATE]
+        while ch != q:
+            ch = self.screen.getch()
+            self.screen.erase()
+            self.draw_score()
+            self.draw_border()
+            with self.pop.transaction():
+                if state[STATE_NEW_LEVEL]:
+                    self.new_level()
+                self.process_aliens()
+                self.process_bullets()
+                self.process_player(ch)
+            sleep(STEP)
+            self.screen.refresh()
+
     def run(self):
         exit = self.intro_loop()
         if exit:
             return
-        # game_loop
+        self.game_loop()
 
 if __name__ == '__main__':
     args = parser.parse_args()
