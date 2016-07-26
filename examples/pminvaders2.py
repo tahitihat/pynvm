@@ -10,23 +10,25 @@ from nvm.pmemobj import PersistentObjectPool, PersistentList
 import logging
 #logging.basicConfig(level=logging.DEBUG)
 
+# We're slow, so shorten the timers and increase the delay.  Even with this
+# the pmem version is slower than the non-pmem version.
+STEP = 50000/1000000
+MAX_GSTATE_TIMER = 100
+MIN_GSTATE_TIMER = 50
+MAX_ALIEN_TIMER = 10
+MAX_PLAYER_TIMER = 10
+MAX_BULLET_TIMER = 5
+MAX_STAR1_TIMER = 2
+MAX_STAR2_TIMER = 1
+ALIEN_TIMER_LEVEL_FACTOR = 1
+
 GAME_WIDTH = 50
 GAME_HEIGHT = 25
 
 ALIENS_ROW = 4
 ALIENS_COL = 18
 
-STEP = 50/1000000
-
 PLAYER_Y = GAME_HEIGHT - 1
-
-MAX_GSTATE_TIMER = 10000
-MIN_GSTATE_TIMER = 5000
-MAX_ALIEN_TIMER = 1000
-MAX_PLAYER_TIMER = 1000
-MAX_BULLET_TIMER = 500
-MAX_STAR1_TIMER = 200
-MAX_STAR2_TIMER = 100
 
 C_UNKNOWN = 0
 C_PLAYER = 1
@@ -44,8 +46,8 @@ CH_SP = ord(' ')
 CH_O = ord('o')
 CH_P = ord('p')
 
-# When we have a working PersistentDict we can use namspaces instead of
-# this named-index hack.
+# When we have a working PersistentObject we can use objects instead of
+# this list-with-named-indexes hack.
 ROOT_STATE = 0
 ROOT_PLAYER = 1
 ROOT_ALIENS = 2
@@ -63,6 +65,10 @@ STATE_DY = 6
 
 PLAYER_X = 0
 PLAYER_TIMER = 1
+
+BULLET_X = 0
+BULLET_Y = 1
+BULLET_TIMER = 2
 
 ALIEN_X = 0
 ALIEN_Y = 1
@@ -246,7 +252,9 @@ class PMInvaders2(object):
             state[STATE_NEW_LEVEL] = 0
             state[STATE_DX] = 1
             state[STATE_DY] = 0
-            state[STATE_TIMER] = MAX_ALIEN_TIMER - 100 * (state[STATE_LEVEL] - 1)
+            state[STATE_TIMER] = (MAX_ALIEN_TIMER
+                                      - ALIEN_TIMER_LEVEL_FACTOR
+                                      * (state[STATE_LEVEL] - 1))
 
     def update_score(self, delta):
         state = self.root[ROOT_STATE]
@@ -285,7 +293,8 @@ class PMInvaders2(object):
         with self.pop.transaction():
             state[STATE_TIMER] -= 1
             if not state[STATE_TIMER]:
-                state[STATE_TIMER] = (MAX_ALIEN_TIMER - 50
+                state[STATE_TIMER] = (MAX_ALIEN_TIMER
+                                        - ALIEN_TIMER_LEVEL_FACTOR
                                         * (state[STATE_LEVEL] - 1))
                 event = self.move_aliens()
                 if event == EVENT_ALIENS_KILLED:
@@ -304,11 +313,29 @@ class PMInvaders2(object):
             self.screen.addch(alien[ALIEN_Y], alien[ALIEN_X],
                               curses.ACS_DIAMOND, curses.color_pair(C_ALIEN))
 
-    def create_bullet(self):
-        pass
+    def process_collision(self, bullet):
+        aliens = self.root[ROOT_ALIENS]
+        with self.pop.transaction():
+            for alien in list(aliens):
+                if (bullet[BULLET_X] == alien[ALIEN_X]
+                        and bullet[BULLET_Y] == alien[ALIEN_Y]):
+                    self.update_score(1)
+                    aliens.remove(alien)
+                    return True
+        return False
 
     def process_bullets(self):
-        pass
+        with self.pop.transaction():
+            for bullet in list(self.root[ROOT_BULLETS]):
+                bullet[BULLET_TIMER] -= 1
+                if not bullet[BULLET_TIMER]:
+                    bullet[BULLET_TIMER] = MAX_BULLET_TIMER
+                    bullet[BULLET_Y] -= 1
+                self.screen.addch(bullet[BULLET_Y], bullet[BULLET_X],
+                                  curses.ACS_BULLET,
+                                  curses.color_pair(C_BULLET))
+                if bullet[BULLET_Y] <= 0 or self.process_collision(bullet):
+                    self.root[ROOT_BULLETS].remove(bullet)
 
     def process_player(self, ch):
         with self.pop.transaction():
@@ -322,8 +349,10 @@ class PMInvaders2(object):
                 dstx = player[PLAYER_X] + 1
                 if dstx != GAME_WIDTH:
                     player[PLAYER_X] = dstx
-            elif ch == CH_SP and not player[PLAYER_TIMER]:
-                self.create_bullet(player[PLAYER_X])
+            elif ch == CH_SP and player[PLAYER_TIMER] <= 0:
+                player[PLAYER_TIMER] = MAX_PLAYER_TIMER
+                self.root[ROOT_BULLETS].append(self.pop.new(PersistentList,
+                    [player[PLAYER_X], PLAYER_Y-1, 1]))
         self.screen.addch(PLAYER_Y, player[PLAYER_X],
                           curses.ACS_DIAMOND,
                           curses.color_pair(C_PLAYER))
