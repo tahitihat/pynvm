@@ -39,6 +39,11 @@ EVENT_PLAYER_KILLED = 0
 EVENT_ALIENS_KILLED = 1
 EVENT_BOUNCE = 2
 
+CH_Q = ord('q')
+CH_SP = ord(' ')
+CH_O = ord('o')
+CH_P = ord('p')
+
 # When we have a working PersistentDict we can use namspaces instead of
 # this named-index hack.
 ROOT_STATE = 0
@@ -202,9 +207,7 @@ class PMInvaders2(object):
 
     def intro_loop(self):
         exit = None
-        q = ord('q')
-        sp = ord(' ')
-        while exit not in (q, sp):
+        while exit not in (CH_Q, CH_SP):
             exit = self.screen.getch()
             self.screen.erase()
             self.draw_border()
@@ -214,7 +217,7 @@ class PMInvaders2(object):
             self.draw_title()
             sleep(STEP)
             self.screen.refresh()
-        return exit == q
+        return exit == CH_Q
 
     def draw_score(self):
         state = self.root[ROOT_STATE]
@@ -301,17 +304,34 @@ class PMInvaders2(object):
             self.screen.addch(alien[ALIEN_Y], alien[ALIEN_X],
                               curses.ACS_DIAMOND, curses.color_pair(C_ALIEN))
 
+    def create_bullet(self):
+        pass
+
     def process_bullets(self):
         pass
 
     def process_player(self, ch):
-        pass
+        with self.pop.transaction():
+            player = self.root[ROOT_PLAYER]
+            player[PLAYER_TIMER] -= 1
+            if ch in (CH_O, curses.KEY_LEFT):
+                dstx = player[PLAYER_X] - 1
+                if dstx:
+                    player[PLAYER_X] = dstx
+            elif ch in (CH_P, curses.KEY_RIGHT):
+                dstx = player[PLAYER_X] + 1
+                if dstx != GAME_WIDTH:
+                    player[PLAYER_X] = dstx
+            elif ch == CH_SP and not player[PLAYER_TIMER]:
+                self.create_bullet(player[PLAYER_X])
+        self.screen.addch(PLAYER_Y, player[PLAYER_X],
+                          curses.ACS_DIAMOND,
+                          curses.color_pair(C_PLAYER))
 
     def game_loop(self):
         ch = None
-        q = ord('q')
         state = self.root[ROOT_STATE]
-        while ch != q:
+        while ch != CH_Q:
             ch = self.screen.getch()
             self.screen.erase()
             self.draw_score()
