@@ -578,7 +578,8 @@ class MemoryManager(object):
         with self.transaction():
             self.snapshot_range(ffi.addressof(p_obj, 'ob_refcnt'),
                                 ffi.sizeof('size_t'))
-            assert p_obj.ob_refcnt > 0
+            assert p_obj.ob_refcnt > 0, "{} oid refcount {}".format(
+                                        oid, p_obj.ob_refcnt)
             p_obj.ob_refcnt -= 1
             if p_obj.ob_refcnt < 1:
                 self._deallocate(oid)
@@ -633,60 +634,56 @@ class PersistentObjectPool(object):
     closed = False
 
     # XXX create should be a keyword-only arg but we don't have those in 2.7.
-    def __init__(self, filename, pool_size=MIN_POOL_SIZE, mode=0o666):
+    def __init__(self, filename, flag='w', pool_size=MIN_POOL_SIZE, mode=0o666):
         """Open or create a persistent object pool backed by filename.
+
+        If flag is 'w', raise an OSError if the file does not exist and
+        otherwise open it for reading and writing.  If flag is 'x', raise an
+        OSError if the file *does* exist, otherwise create it and open it for
+        reading and writing.  If flag is 'c', create the file if it does not
+        exist, otherwise use the existing file.
 
         If the file gets created, use pool_size as the size of the new pool in
         bytes and mode as its access mode, otherwise ignore these parameters
         and open the existing file.
 
-        See also the open and create functions of nvm.pmemobj, which insure
-        that the file exists or does not, respectively.
+        See also the open and create functions of nvm.pmemobj, which are
+        convenience functions for the 'w' and 'x' flags, respectively.
         """
-        log.debug('PersistentObjectPool.__init__: %r, %r, %r',
-                  filename, pool_size, mode)
+        log.debug('PersistentObjectPool.__init__: %r, %r %r, %r',
+                  filename, flag, pool_size, mode)
         self.filename = filename
-        if os.path.exists(filename):
-            self._open(filename)
+        exists = os.path.exists(filename)
+        if flag == 'w' or (flag == 'c' and exists):
+            self._pool_ptr = _check_null(
+                lib.pmemobj_open(_coerce_fn(filename),
+                                 layout_version))
+        elif flag == 'x' or (flag == 'c' and not exists):
+            self._pool_ptr = _check_null(
+                lib.pmemobj_create(_coerce_fn(filename),
+                                   layout_version,
+                                   pool_size,
+                                   mode))
+        elif flag == 'r':
+            raise ValueError("Read-only mode is not supported")
         else:
-            self._create(filename, pool_size, mode)
-
-
-    def _create(self, filename, pool_size, mode):
-        self._pool_ptr = _check_null(lib.pmemobj_create(_coerce_fn(filename),
-                                                        layout_version,
-                                                        pool_size, mode))
+            raise ValueError("Invalid flag value {}".format(flag))
         mm = self.mm = MemoryManager(self._pool_ptr)
-        with mm.transaction():
-            pmem_root = lib.pmemobj_root(self._pool_ptr, ffi.sizeof('PRoot'))
-            pmem_root = ffi.cast('PRoot *', mm.direct(pmem_root))
-            type_table_oid = mm._create_type_table()
-            mm.snapshot_range(pmem_root, ffi.sizeof('PRoot'))
-            pmem_root.type_table = type_table_oid
-            self._pmem_root = pmem_root
-
-    def _open(self, filename):
-        self._pool_ptr = _check_null(lib.pmemobj_open(_coerce_fn(filename),
-                                                      layout_version))
-        mm = self.mm = MemoryManager(self._pool_ptr)
-        size = lib.pmemobj_root_size(self._pool_ptr)
-        if size:
-            pmem_root = mm.direct(lib.pmemobj_root(self._pool_ptr, 0))
-            pmem_root = ffi.cast('PRoot *', pmem_root)
-        # pmemobj_root being inside a transaction does not make it atomic; we
-        # aren't using pmemobj_root_construct.  So we need to check whether or
-        # not initialization completed.  Since the type_table will be non-zero
-        # if and only if it did, we'll use that as our initialization flag.
-        # XXX I'm not sure the check for pmem_root not NULL is needed.
-        if not size or pmem_root == ffi.NULL or not pmem_root.type_table:
-            raise RuntimeError("Pool {} not initialized completely; delete"
-                               "the file and try again".format(
-                self.filename))
+        pmem_root = lib.pmemobj_root(self._pool_ptr, ffi.sizeof('PRoot'))
+        pmem_root = ffi.cast('PRoot *', mm.direct(pmem_root))
+        type_table_oid = mm.otuple(pmem_root.type_table)
+        if type_table_oid == mm.OID_NULL:
+            with mm.transaction():
+                type_table_oid = mm._create_type_table()
+                mm.snapshot_range(pmem_root, ffi.sizeof('PObjPtr'))
+                pmem_root.type_table = type_table_oid
+        else:
+            mm._resurrect_type_table(type_table_oid)
         self._pmem_root = pmem_root
-        mm._resurrect_type_table(pmem_root.type_table)
-        # Make sure any objects orphaned by a crash are cleaned up.
-        # XXX should fix this to only be called when there is a crash.
-        self.gc()
+        if exists:
+            # Make sure any objects orphaned by a crash are cleaned up.
+            # XXX should fix this to only be called when there is a crash.
+            self.gc()
 
     def close(self):
         """Close the object pool, freeing any unreferenced objects.
@@ -805,6 +802,8 @@ class PersistentObjectPool(object):
                                                 self.mm._type_table[type_code])
                     typ = types[type_code]
                     type_counts[typ.__name__] += 1
+                    assert obj.ob_refcnt >= 0, "{} refcount is {}".format(
+                                                oid, obj.ob_refcnt)
                     if not obj.ob_refcnt:
                         if debug:
                             log.debug('gc: orphan: %s %s %r',
@@ -912,17 +911,14 @@ def open(filename):
     """
     log.debug('open: %s', filename)
     # Make sure the file exists.
-    if not os.path.exists(filename):
-        # Pass through the libpmemobj error message.
-        _check_null(lib.pmemobj_open(_coerce_fn(filename), layout_version))
-    return PersistentObjectPool(filename)
+    return PersistentObjectPool(filename, flag='w')
 
 def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     """The `create()` function creates an object pool with the given total
     `pool_size`.  Since the transactional nature of an object pool requires
     some space overhead, and immutable values are stored alongside the mutable
     containers that point to them, the space requirement of a given set of
-    objects is ocnsiderably larger than a naive calculation based on
+    objects is considerably larger than a naive calculation based on
     sys.getsize would suggest.
 
     Raises RuntimeError if the file cannot be created or mapped.
@@ -934,9 +930,5 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     :return: a :class:`PersistentObjectPool` instance that manages the pool.
     """
     log.debug('create: %s, %s, %s', filename, pool_size, mode)
-    # Make sure the file does not already exist.
-    if os.path.exists(filename):
-        # Pass through the libpmemobj error message.
-        _check_null(lib.pmemobj_create(_coerce_fn(filename), layout_version,
-                                       pool_size, mode))
-    return PersistentObjectPool(filename, pool_size, mode)
+    return PersistentObjectPool(filename, flag='x',
+                                pool_size=pool_size, mode=mode)

@@ -76,6 +76,26 @@ class TestPersistentObjectPool(TestCase):
         with self.assertRaises(OSError):
             pmemobj.open(fn)
 
+    def test_constructor_default_flag_is_w(self):
+        fn = self._test_fn()
+        with self.assertRaises(OSError):
+            pmemobj.PersistentObjectPool(fn)
+
+    def test_constructor_flag_x(self):
+        fn = self._test_fn()
+        pop = pmemobj.create(fn)
+        pop.close()
+        with self.assertRaises(OSError):
+            pmemobj.PersistentObjectPool(fn, flag='x')
+
+    def test_constructor_flag_c(self):
+        fn = self._test_fn()
+        pop = pmemobj.PersistentObjectPool(fn, flag='c')
+        pop.root = 10
+        pop.close()
+        pop = pmemobj.PersistentObjectPool(fn)
+        self.assertEqual(pop.root, 10)
+
     def test_filename_is_preserved(self):
         fn = self._test_fn()
         pop = pmemobj.create(fn)
