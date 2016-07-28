@@ -634,7 +634,8 @@ class PersistentObjectPool(object):
     closed = False
 
     # XXX create should be a keyword-only arg but we don't have those in 2.7.
-    def __init__(self, filename, flag='w', pool_size=MIN_POOL_SIZE, mode=0o666):
+    def __init__(self, filename, flag='w',
+                       pool_size=MIN_POOL_SIZE, mode=0o666, debug=False):
         """Open or create a persistent object pool backed by filename.
 
         If flag is 'w', raise an OSError if the file does not exist and
@@ -647,12 +648,17 @@ class PersistentObjectPool(object):
         bytes and mode as its access mode, otherwise ignore these parameters
         and open the existing file.
 
+        If debug is True, generate some additional logging, including turning
+        on some additional sanity-check warnings.  This may have an impact
+        on performance.
+
         See also the open and create functions of nvm.pmemobj, which are
         convenience functions for the 'w' and 'x' flags, respectively.
         """
         log.debug('PersistentObjectPool.__init__: %r, %r %r, %r',
                   filename, flag, pool_size, mode)
         self.filename = filename
+        self.debug = debug
         exists = os.path.exists(filename)
         if flag == 'w' or (flag == 'c' and exists):
             self._pool_ptr = _check_null(
@@ -757,7 +763,7 @@ class PersistentObjectPool(object):
         return typ(*args, __manager__=self.mm, **kw)
 
     # If I didn't have to support python2 I'd make debug keyword only.
-    def gc(self, debug=False):
+    def gc(self, debug=None):
         # XXX add debug flag to constructor, and a test that orphans
         # generate warning messages when debug=True.
         """Free all unreferenced objects (cyclic garbage).
@@ -774,6 +780,7 @@ class PersistentObjectPool(object):
         # Currently we are not doing generations; we can get more complicated
         # later if we want to run the GC periodically.
 
+        debug = self.debug if debug is None else debug
         log.debug('gc: start')
         containers = set()
         other = set()
@@ -897,7 +904,7 @@ class PersistentObjectPool(object):
             return dict(type_counts), dict(gc_counts)
 
 
-def open(filename):
+def open(filename, debug=False):
     """This function opens an existing object pool, returning a
     :class:`PersistentObjectPool`.
 
@@ -909,11 +916,11 @@ def open(filename):
                      and memory map it with read/write permissions.
     :return: a :class:`PersistentObjectPool` instance that manages the pool.
     """
-    log.debug('open: %s', filename)
+    log.debug('open: %s, debug=%s', filename, debug)
     # Make sure the file exists.
-    return PersistentObjectPool(filename, flag='w')
+    return PersistentObjectPool(filename, flag='w', debug=debug)
 
-def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
+def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666, debug=False):
     """The `create()` function creates an object pool with the given total
     `pool_size`.  Since the transactional nature of an object pool requires
     some space overhead, and immutable values are stored alongside the mutable
@@ -929,6 +936,6 @@ def create(filename, pool_size=MIN_POOL_SIZE, mode=0o666):
     :param mode: specifies the permissions to use when creating the file.
     :return: a :class:`PersistentObjectPool` instance that manages the pool.
     """
-    log.debug('create: %s, %s, %s', filename, pool_size, mode)
+    log.debug('create: %s, %s, %s, debug=%s', filename, pool_size, mode, debug)
     return PersistentObjectPool(filename, flag='x',
-                                pool_size=pool_size, mode=mode)
+                                pool_size=pool_size, mode=mode, debug=debug)

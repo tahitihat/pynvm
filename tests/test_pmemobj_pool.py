@@ -1,4 +1,5 @@
 # -*- coding: utf8 -*-
+import logging
 import sys
 import unittest
 
@@ -95,6 +96,17 @@ class TestPersistentObjectPool(TestCase):
         pop.close()
         pop = pmemobj.PersistentObjectPool(fn)
         self.assertEqual(pop.root, 10)
+
+    @unittest.skipIf(sys.version_info[0] < 3, 'test only runs on python3')
+    def test_debug(self):
+        # When debug is on, orphans are logged as warnings (in production
+        # an orphan is not necessarily a bug).
+        fn = self._test_fn()
+        pop = pmemobj.PersistentObjectPool(fn, flag='c', debug=True)
+        pop.new(pmemobj.PersistentList)
+        with self.assertLogs('nvm.pmemobj', logging.WARNING) as cm:
+            pop.gc()
+        self.assertTrue(any('orphan' in l for l in cm.output))
 
     def test_filename_is_preserved(self):
         fn = self._test_fn()
