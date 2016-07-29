@@ -124,7 +124,18 @@ class TestPersistentObjectPool(TestCase):
 
 
 @parameterize
-class TestSimpleImmutablePersistence(TestCase):
+class TestPersistence(TestCase):
+
+    def _setup(self):
+        self.fn = self._test_fn()
+        pop = self.pop = pmemobj.create(self.fn)
+        self.addCleanup(lambda: self.pop.close())
+        return pop
+
+    def _reopen_pop(self):
+        self.pop.close()
+        pop = self.pop = pmemobj.open(self.fn)
+        return pop
 
     objs_params = dict(int=5,
                        float=10.5,
@@ -135,15 +146,26 @@ class TestSimpleImmutablePersistence(TestCase):
         objs_params['long_int'] = sys.maxint * 2
 
     def objs_as_root_object(self, obj):
-        fn = self._test_fn()
-        pop = pmemobj.create(fn)
-        self.addCleanup(pop.close)
+        pop = self._setup()
         pop.root = obj
         self.assertEqual(pop.root, obj)
-        pop.close()
-        pop = pmemobj.open(fn)
+        pop = self._reopen_pop()
         self.assertEqual(pop.root, obj)
         pop.close()
+
+    def test_id_int_collision(self):
+        # We construct keys for mutable objects we cache using object ids.
+        # Make sure that key doesn't collide with a real int in the cache.
+        pop = self._setup()
+        root = pop.root = pop.new(pmemobj.PersistentList)
+        pid = id(pop.root)
+        pop.root.append(pid)
+        # pop.root gets resurrected from cache here.
+        self.assertIs(pop.root, root)
+        # And the list's first element gets resurrected from cache here.  That
+        # 'is' works here is not actually an API requirement, but it is an
+        # reality of the current code that isn't likely to break.
+        self.assertIs(pop.root[0], pid)
 
 
 class TestTransactions(TestCase):

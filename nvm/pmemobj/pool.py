@@ -131,6 +131,23 @@ def _find_class_from_string(cls_string):
     return res
 
 
+class ObjKey(object):
+
+    def __init__(self, obj):
+        self.id = id(obj)
+
+    def __eq__(self, other):
+        if not isinstance(other, ObjKey):
+            return NotImplemented
+        return self.id == other.id
+
+    def __hash__(self):
+        return hash(self.id)
+
+    def __repr__(self):
+        return str(self.id)
+
+
 class _ObjCache(object):
 
     def __init__(self):
@@ -145,7 +162,7 @@ class _ObjCache(object):
         # only need to persist one equivalent copy.  For mutables use the
         # object id, since we must persist each instance even if they are
         # otherwise equal.
-        return obj if getattr(obj, '__hash__', None) else id(obj)
+        return obj if getattr(obj, '__hash__', None) else ObjKey(obj)
 
     def clear(self):
         # XXX I'm not sure we can get away with mapping OID_NULL
