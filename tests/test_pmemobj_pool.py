@@ -285,6 +285,7 @@ class TestTransactions(TestCase):
         self.assertIsNone(pop.root)
         with pop.transaction():
             pop.root = 10
+        self.assertEqual(pop.root, 10)
 
     def test_context_abort_nested_transactions(self):
         pop = self._setup()
@@ -299,6 +300,7 @@ class TestTransactions(TestCase):
         self.assertIsNone(pop.root)
         with pop.transaction():
             pop.root = 10
+        self.assertEqual(pop.root, 10)
 
 
 class TestGC(TestCase):

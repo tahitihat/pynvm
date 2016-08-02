@@ -25,6 +25,7 @@ OID_NULL = (lib.OID_NULL.pool_uuid_lo, lib.OID_NULL.off)
 # Arbitrary numbers.
 POBJECT_TYPE_NUM = 20
 POBJPTR_ARRAY_TYPE_NUM = 21
+INTERNAL_ABORT_ERRNO = 99999
 
 
 # XXX move this to a central location and use in all libraries.
@@ -253,10 +254,6 @@ class _Transaction(object):
     def depth(self):
         return len(self._trans_stack)
 
-    def _context_abort(self, msg):
-        lib.pmemobj_tx_abort(errno.ECANCELED)
-        raise RuntimeError('Transaction aborted: ' + msg)
-
     def begin(self):
         """Start a new (sub)transaction."""
         tlog.debug('start_transaction %s', self._trans_stack)
@@ -270,7 +267,7 @@ class _Transaction(object):
         if not self._trans_stack:
             raise RuntimeError("commit called outside of transaction")
         if self._trans_stack[-1] != self._FREE:
-            self._context_abort("Non-context commit inside a context")
+            raise RuntimeError("Non-context commit inside a context")
         self._trans_stack.pop()
         lib.pmemobj_tx_commit()
         _check_errno(lib.pmemobj_tx_end())
@@ -294,11 +291,11 @@ class _Transaction(object):
         return self
 
     def __exit__(self, *args):
-        tlog.debug('__exit__: %s, %s', self._trans_stack, args)
+        tlog.debug('__exit__: %s, %r', self._trans_stack, args[1])
         if self._trans_stack.pop() == self._FREE:
             while self._trans_stack.pop() == self._FREE:
                 lib.pmemobj_tx_end()
-            self._context_abort("Non-context transaction open at context end.")
+            raise RuntimeError("Non-context transaction open at context end.")
         stage = lib.pmemobj_tx_stage()
         if stage == lib.TX_STAGE_WORK:
             if args[0] is None:
@@ -310,11 +307,11 @@ class _Transaction(object):
                 # We have a Python exception that didn't result from an error
                 # in the pmemobj library, so manually roll back the transaction
                 # since the python block won't have completed.
-                lib.pmemobj_tx_abort(errno.ECANCELED)
+                lib.pmemobj_tx_abort(INTERNAL_ABORT_ERRNO)
         err = lib.pmemobj_tx_end()
         if err:
             self._obj_cache.clear_transaction_cache()
-            if err != errno.ECANCELED or args[0] is None:
+            if err != INTERNAL_ABORT_ERRNO:
                 _raise_per_errno()
         elif not self._trans_stack:
             self._obj_cache.commit_transaction_cache()
