@@ -1,0 +1,89 @@
+This file tests and demonstrates the 'accounts' example program.  We're using
+doctest here for two reasons: (1) accounts is a command line program that
+produces output on the terminal, so doctest's "show the command and check the
+output" approach is a natural fit, and (2) accounts is demonstrating the
+*persistence* of data between command runs, so a long string of examples that
+progressively modify the data is a better fit than the unit test approach.  To
+do the same thing in unit test would be harder to read, more verbose (because
+each test would need multiple commands to test the persistence), and not really
+*unit* tests in the sense the unit test framework is designed for writing.
+
+To run these tests you should have your current directory be the directory
+containing the 'nvm' package, and run the following command:
+
+    python -m doctest tests/accounts.doctest
+
+The doctest will only run if the 'accounts' demo is in 'examples/accounts'
+relative to that same current directory.
+
+The persistent data used by the tests is backed by a file.  For current testing
+purposes we're using an ordinary file system file in the temporary directory
+using libpmem's pmem emulation support.  For a test of a demo program more
+than that is not really needed.
+
+If a test run aborts, that file will be left behind, so the first thing
+we need to do is remove the temp file:
+
+    >>> import tempfile
+    >>> import os
+    >>> PMEM_FILE = os.path.join(tempfile.gettempdir(), 'accounts.pmem')
+    >>> if os.path.exists(PMEM_FILE):
+    ...     os.remove(PMEM_FILE)
+
+The tests below use a common format: we call the accounts demo program using
+a set of arguments, and see the output that produces.  Since we're running this
+from inside doctest, which executes python code, we need a helper function to
+run the command:
+
+    >>> import sys
+    >>> from subprocess import Popen, PIPE
+    >>> def run(cmd):
+    ...     cmd, _, args = cmd.partition(' ')
+    ...     cmd = (sys.executable + ' ' + os.path.join('examples', cmd)
+    ...             + ' -f' + PMEM_FILE + ' ' + args)
+    ...     p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE,
+    ...                    universal_newlines=True)
+    ...     rc = p.wait()
+    ...     for line in p.stdout:
+    ...        print(line.rstrip('\n'))
+    ...     errs = p.stderr.read().splitlines()
+    ...     if errs:
+    ...         print('--------- error output --------')
+    ...         for line in p.stderr:
+    ...             print(line)
+
+This function takes care of the boilerplate of turning the command name
+'accounts' into a call to it using the same interpreter used to run the
+doctests, in its expected location in the examples directory, and passing to it
+the -f option to specify the location of our test database instead of using its
+default.  It also prints a line dividing normal output from error output if
+there is any error output, allowing us to check that error output goes to the
+correct standard stream.
+
+Initially, the file holding the data does not exist:
+
+    >>> os.path.exists(PMEM_FILE)
+    False
+
+The default action of the 'accounts' command is to show a summary of the
+current accounts.  Initially that will just be a message that there are
+no accounts:
+
+    >>> run('accounts')
+    No accounts currently exist.  Add an account using 'account create'.
+
+But now the (empty) persistent memory file will exist:
+
+    >>> os.path.exists(PMEM_FILE)
+    True
+
+If we create an account, by default it starts with a zero balance:
+
+    >>> run('accounts create checking')
+    Created account 'checking'.
+    >>> run('accounts')                     # doctest: +ELLIPSIS
+    Account         ...   Balance
+    -------         ...   -------
+    checking        ...      0.00
+                    ...   _______
+        Net Worth:  ...      0.00
