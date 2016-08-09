@@ -7,7 +7,7 @@ with any bugs that may exist in the real PersistentObjectPool.
 """
 
 import os
-import json
+import pickle
 
 from contextlib import contextmanager
 
@@ -23,12 +23,12 @@ class PersistentObjectPool:
         self.filename = filename
         exists = os.path.exists(filename)
         if flag == 'w' or (flag == 'c' and exists):
-            with open(filename) as f:
-                self.root = json.load(f)[0]
+            with open(filename, 'rb') as f:
+                self.root = pickle.load(f)[0]
         elif flag == 'x' or (flag == 'c' and not exists):
-            with open(filename, 'w') as f:
+            with open(filename, 'wb') as f:
                 self.root = None
-                json.dump([None], f)
+                pickle.dump([None], f)
         elif flag == 'r':
             raise ValueError("Read-only mode is not supported")
         else:
@@ -45,8 +45,8 @@ class PersistentObjectPool:
         yield None
 
     def close(self):
-        with open(self.filename+'.tmp', 'w') as f:
-            json.dump([self.root], f)
+        with open(self.filename+'.tmp', 'wb') as f:
+            pickle.dump([self.root], f)
         os.rename(self.filename+'.tmp', self.filename)
 
     def __enter__(self):
