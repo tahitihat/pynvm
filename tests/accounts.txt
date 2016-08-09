@@ -90,6 +90,68 @@ If we create an account, by default it starts with a zero balance:
                        _______
         Net Worth:        0.00
 
+When we create an account, we can specify an initial balance:
+
+    >>> run('accounts create savings 119.00')
+    Created account 'savings'.
+    >>> run('accounts')
+    Account            Balance
+    -------            -------
+    checking              0.00
+    savings             119.00
+                       _______
+        Net Worth:      119.00
+
+The only transaction in a newly created account is the initial balance:
+
+    >>> run('accounts list checking')
+    Date         Amount  Balance  Memo
+    ----------  -------  -------  ----
+    2015-08-09     0.00     0.00  Initial account balance
+
+    >>> run('accounts list savings')
+    Date         Amount  Balance  Memo
+    ----------  -------  -------  ----
+    2015-08-09   119.00   119.00  Initial account balance
+
+If we transfer money between accounts, that will add a transaction to
+each account:
+
+    >>> run('accounts transfer 50.50 savings checking For check 115')
+    Transferred 50.50 from savings (new balance 68.50) to savings (new balance 50.50)
+
+    >>> run('accounts list checking')
+    Date         Amount  Balance  Memo
+    ----------  -------  -------  ----
+    2015-08-09    50.50    50.50  For check 115
+    2015-08-09     0.00     0.00  Initial account balance
+
+    >>> run('accounts list savings')
+    Date         Amount  Balance  Memo
+    ----------  -------  -------  ----
+    2015-08-09   -50.50    68.50  For check 115
+    2015-08-09   119.00   119.00  Initial account balance
+
+When check 115 clears we can do:
+
+    >>> run('accounts check 115 checking 50.50 Vet bill')
+    Check 115 for 50.50 debited from checking (new balance 0.00)
+
+    >>> run('accounts list checking')
+    Date         Amount  Balance  Memo
+    ----------  -------  -------  ----
+    2015-08-09   -50.50     0.00  Check 115: Vet bill
+    2015-08-09    50.50    50.50  For check 115
+    2015-08-09     0.00     0.00  Initial account balance
+
+(Aside: it would be nice to have the account name in the previous command
+have a default value that could be established by an 'accounts set
+default-checking checking' command so that we could just type 'accounts
+check 115 50.50 Vet bill'), but that is a bit complicated to code with
+argparse so we won't bother with doing that for this demo program.)
+
+
+
 
 
 Cleanup:
