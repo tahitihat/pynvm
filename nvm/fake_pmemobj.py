@@ -11,7 +11,12 @@ import json
 
 from contextlib import contextmanager
 
-from nvm.pmemobj import PersistentList, PersistentDict
+#from nvm.pmemobj import PersistentList, PersistentDict
+
+class PersistentList(object):
+    pass
+class PersistentDict(object):
+    pass
 
 class PersistentObjectPool:
     def __init__(self, filename, flag='w', *args, **kw):

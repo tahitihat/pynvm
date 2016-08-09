@@ -11,7 +11,7 @@ each test would need multiple commands to test the persistence), and not really
 To run these tests you should have your current directory be the directory
 containing the 'nvm' package, and run the following command:
 
-    python -m doctest tests/accounts.doctest
+    python3 -m doctest tests/accounts.txt
 
 The doctest will only run if the 'accounts' demo is in 'examples/accounts'
 relative to that same current directory.
@@ -38,18 +38,20 @@ run the command:
     >>> import sys
     >>> from subprocess import Popen, PIPE
     >>> def run(cmd):
+    ...     env = os.environ
+    ...     env['PYTHONPATH'] = '.'
     ...     cmd, _, args = cmd.partition(' ')
-    ...     cmd = (sys.executable + ' ' + os.path.join('examples', cmd)
-    ...             + ' -f' + PMEM_FILE + ' ' + args)
+    ...     cmd = (sys.executable + ' ' + os.path.join('examples', cmd + '.py')
+    ...             + ' -f ' + PMEM_FILE + ' ' + args)
     ...     p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE,
-    ...                    universal_newlines=True)
+    ...                    universal_newlines=True, env=env)
     ...     rc = p.wait()
     ...     for line in p.stdout:
     ...        print(line.rstrip('\n'))
     ...     errs = p.stderr.read().splitlines()
     ...     if errs:
     ...         print('--------- error output --------')
-    ...         for line in p.stderr:
+    ...         for line in errs:
     ...             print(line)
 
 This function takes care of the boilerplate of turning the command name
@@ -87,3 +89,10 @@ If we create an account, by default it starts with a zero balance:
     checking        ...      0.00
                     ...   _______
         Net Worth:  ...      0.00
+
+
+
+Cleanup:
+    >>> if os.path.exists(PMEM_FILE):
+    ...     os.remove(PMEM_FILE)
+
