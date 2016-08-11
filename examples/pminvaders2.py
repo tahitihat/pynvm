@@ -93,7 +93,7 @@ parser.add_argument('--no-pmem', action='store_true',
                     help="Use dummy PersistentObjectPool instead of real one")
 
 class DummyPersistentObjectPool:
-    def __init__(self, *args):
+    def __init__(self, *args, **kw):
         self.root = None
         pass
     def new(self, typ, *args, **kw):
