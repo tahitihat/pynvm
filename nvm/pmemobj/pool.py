@@ -24,7 +24,6 @@ MAX_OBJ_SIZE = lib.PMEMOBJ_MAX_ALLOC_SIZE
 OID_NULL = (lib.OID_NULL.pool_uuid_lo, lib.OID_NULL.off)
 # Arbitrary numbers.
 POBJECT_TYPE_NUM = 20
-POBJPTR_ARRAY_TYPE_NUM = 21
 INTERNAL_ABORT_ERRNO = 99999
 
 
@@ -361,15 +360,6 @@ class MemoryManager(object):
         log.debug('malloced oid: %s', oid)
         return oid
 
-    def malloc_ptrs(self, count):
-        """Return pointer to enough persistent memory for count pointers.
-
-        The pmem type number is set to POBJPTR_ARRAY_TYPE_NUM.
-        """
-        log.debug('malloc_ptrs: %r', count)
-        return self.malloc(count * ffi.sizeof('PObjPtr'),
-                            type_num=POBJPTR_ARRAY_TYPE_NUM)
-
     def realloc(self, oid, size, type_num=None):
         """Copy oid contents into size bytes of new persistent memory.
 
@@ -387,13 +377,6 @@ class MemoryManager(object):
             _raise_per_errno()
         log.debug('oid: %s', oid)
         return oid
-
-    def realloc_ptrs(self, oid, count):
-        oid = self.otuple(oid)
-        log.debug('realloc_ptrs: %r %r', oid, count)
-        """As realloc, but the new memory is enough for count pointers."""
-        return self.realloc(oid, count * ffi.sizeof('PObjPtr'),
-                             POBJPTR_ARRAY_TYPE_NUM)
 
     def free(self, oid):
         """Free the memory pointed to by oid."""
