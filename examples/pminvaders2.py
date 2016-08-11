@@ -9,7 +9,14 @@ from time import sleep
 from nvm.pmemobj import PersistentObjectPool, PersistentList
 
 import logging
-#logging.basicConfig(level=logging.DEBUG)
+import logging.handlers
+sout = logging.StreamHandler(sys.stdout)
+sout.setFormatter(logging.Formatter('%(asctime)s %(name)-15s %(levelname)-8s %(message)s'))
+mout = logging.handlers.MemoryHandler(100*10000, target=sout)
+mout.setFormatter(logging.Formatter('%(asctime)s %(name)-15s %(levelname)-8s %(message)s'))
+root = logging.getLogger()
+#root.setLevel(logging.DEBUG)
+root.addHandler(mout)
 
 # We're slow, so shorten the timers and increase the delay.  Even with this
 # the pmem version is slower than the non-pmem version.
@@ -385,10 +392,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.no_pmem:
         PersistentObjectPool = DummyPersistentObjectPool
-    pop = PersistentObjectPool(args.fn, flag='c')
+    pop = PersistentObjectPool(args.fn, flag='c', debug=True)
     g = PMInvaders2(pop)
     try:
         g.run()
     finally:
         g.close()
+        mout.flush()
         pop.close()
