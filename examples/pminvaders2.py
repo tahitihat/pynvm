@@ -189,7 +189,7 @@ class PMInvaders2(object):
                         star[STAR_TIMER] = MAX_STAR2_TIMER
                     star[STAR_Y] += 1
                 self.draw_star(star)
-                if star[STAR_Y] >= GAME_HEIGHT:
+                if star[STAR_Y] >= GAME_HEIGHT-1:
                     stars.remove(star)
             if new_line:
                 self.create_stars()
