@@ -769,8 +769,13 @@ class PersistentObjectPool(object):
         referenced somewhere in the tree is freed.  This collects cyclic
         garbage, and produces warnings for unreferenced objects with incorrect
         refcounts.  Most garbage is automatically collected when the object is
-        no longer referenced.  If debug is true, the debug logging output
-        will include reprs of the objects encountered.
+        no longer referenced.
+
+        If debug is true, the debug logging output will include reprs of the
+        objects encountered, all orphans will be logged as warnings, and
+        additional checks will be done for orphaned or invalid data structures
+        (those reported by a Persistent object's _substructures method).
+
         """
         # XXX CPython uses a three generation GC in order to obtain more or
         # less linear performance against the total number of objects.
@@ -783,6 +788,7 @@ class PersistentObjectPool(object):
         other = set()
         orphans = set()
         types = {}
+        substructures = collections.defaultdict(dict)
         type_counts = collections.defaultdict(int)
         gc_counts = collections.defaultdict(int)
 
@@ -824,7 +830,9 @@ class PersistentObjectPool(object):
                                       oid, obj.ob_refcnt, self.mm.resurrect(oid))
                         other.add(oid)
                 else:
-                    log.debug("gc: non PObject: %s", oid)
+                    if debug:
+                        log.debug("gc: non PObject (type %s): %s", type_num, oid)
+                        substructures[type_num][oid] = []
                 oid = self.mm.otuple(lib.pmemobj_next(oid))
             gc_counts['containers-total'] = len(containers)
             gc_counts['other-total'] = len(other)
@@ -838,6 +846,33 @@ class PersistentObjectPool(object):
                     log.warning("deallocating orphan (refcount 0): %s %r",
                                 oid, self.mm.resurrect(oid))
                 self.mm._deallocate(oid)
+
+            # In debug mode, validate the container substructures.
+            if debug:
+                log.debug("Checking substructure integrity")
+                for container_oid in containers:
+                    container = self.mm.resurrect(container_oid)
+                    for oid, type_num in container._substructures():
+                        oid = self.mm.otuple(oid)
+                        if oid == self.mm.OID_NULL:
+                            continue
+                        if oid not in substructures[type_num]:
+                            log.error("%s points to subsctructure type %s"
+                                      " at %s, but we didn't find it in"
+                                      " the pmemobj object list.",
+                                      container_oid, type_num, oid)
+                        else:
+                            substructures[type_num][oid].append(container_oid)
+                for type_num, structs in substructures.items():
+                    for struct_oid, parent_oids in structs.items():
+                        if not parent_oids:
+                            log.error("substructure type %s at %s is not"
+                                      " referenced by any existing object.",
+                                      type_num, struct_oid)
+                        elif len(parent_oids) > 1:
+                            log.error("substructure type %s at %s is"
+                                      "referenced by more than once object: %s",
+                                      type_num, struct_oid, parent_oids)
 
             # Trace the object tree, removing objects that are referenced.
             containers.remove(self.mm._type_table._oid)

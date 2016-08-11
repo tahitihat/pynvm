@@ -197,5 +197,8 @@ class PersistentList(abc.MutableSequence):
         for i in range(len(self)):
             yield items[i]
 
+    def _substructures(self):
+        return ((self._body.ob_items, LIST_POBJPTR_ARRAY_TYPE_NUM),)
+
     def _deallocate(self):
         self.clear()
