@@ -252,6 +252,9 @@ around the pmemobj API, which by itself isn't very useful from Python, pynvm
 provides a full python interface.  This interface allows to you store
 Python objects persistently.
 
+This is a work in progress: currently persistence is supported only for lists
+(PersistentList), integers, strings, floats, and None.
+
 Creating a PersistentObjectPool and storing objects in it
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 You can see an example below of how to use the :mod:`nvm.pmemobj` API:
