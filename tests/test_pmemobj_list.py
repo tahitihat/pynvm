@@ -134,6 +134,25 @@ class TestPersistentList(TestCase):
         lst.append(1)
         self.assertEqual(lst, [1])
 
+    def test_eq(self):
+        lst = self._make_list([])
+        self.assertEqual(lst, [])
+        lst.append(self.pop.new(pmemobj.PersistentList))
+        lst.append(self.pop.new(pmemobj.PersistentList))
+        self.assertEqual(lst, [[], []])
+        self.assertEqual(lst[0], lst[1])
+        lst[0].extend([1, 3, 2])
+        lst[1].extend([1, 3, 2])
+        self.assertEqual(lst[0], lst[1])
+        self.assertEqual(lst[0], [1, 3, 2])
+        self.assertEqual(lst[1], [1, 3, 2])
+        self.assertEqual(lst, [[1, 3, 2], [1, 3, 2]])
+        self.assertNotEqual(lst[0], [1])
+        self.assertNotEqual(lst[0], [1, 2, 3])
+        self.assertNotEqual(lst[0], (1, 3, 2))
+        lst[0].append(5)
+        self.assertNotEqual(lst[0],lst[1])
+
 
 if __name__ == '__main__':
     unittest.main()

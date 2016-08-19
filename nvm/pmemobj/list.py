@@ -1,4 +1,5 @@
 import collections
+import sys
 
 from .compat import recursive_repr, abc
 
@@ -160,20 +161,19 @@ class PersistentList(abc.MutableSequence):
                                  ', '.join("{!r}".format(x) for x in self))
 
     def __eq__(self, other):
-        try:
-            ol = len(other)
-        except AttributeError:
+        if not (isinstance(other, PersistentList) or
+                isinstance(other, list)):
             return NotImplemented
-        if len(self) != ol:
+        if len(self) != len(other):
             return False
         for i in range(len(self)):
-            try:
-                ov = other[i]
-            except (AttributeError, IndexError):
-                return NotImplemented
-            if self[i] != ov:
+            if self[i] != other[i]:
                 return False
         return True
+
+    if sys.version_info[0] < 3:
+        def __ne__(self, other):
+            return not self == other
 
     def clear(self):
         mm = self.__manager__
