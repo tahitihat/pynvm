@@ -243,6 +243,51 @@ You can see an example below on how to use the :mod:`nvm.pmemblk` API:
     blockpool.close()
 
 
+Using pmemobj (*persistent objects*)
+-------------------------------------------------------------------------------
+The pmemobj module provides a pythonic interface to :mod:`nvm.pmemobj`, which
+provides transactionally managed access to memory that supports mallocing and
+freeing memory areas.  In this case, rather than provide a simple wrapper
+around the pmemobj API, which by itself isn't very useful from Python, pynvm
+provides a full python interface.  This interface allows to you store
+Python objects persistently.
+
+This is a work in progress: currently persistence is supported only for lists
+(PersistentList), integers, strings, floats, and None.
+
+Creating a PersistentObjectPool and storing objects in it
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+You can see an example below of how to use the :mod:`nvm.pmemobj` API:
+
+.. code-block:: python
+
+    from nvm import pmemobj
+
+    # Open the object pool, creating it if it doesn't exist yet.
+    pop = pmemobj.PersistentObjectPool('mylist.pmemobj', flag='c')
+
+    # Use a persistent list as the root object of the pool.
+    if pop.root is None:
+        pop.root = pop.new(pmemobj.PersistentList)
+
+    # Make sure we have three sub-lists.
+    for i in range(len(pop.root), 3):
+        pop.root[i] = pop.new(pmemobj.PersistentList)
+
+    # Append some data.  Either all of this data will get appended,
+    # or none of it will.
+    with pop.transaction():
+        for i in range(len(self.root)):
+            root[i].append(i)
+
+    # Close and reopen the pool.
+    pop.close()
+    pop = pmemobj.PersistentObjectPool('mylist.pmemobj', flag='c')
+
+    # The list values are still there.
+    assert pop.root == [[1], [2], [3]]
+
+
 Examples
 ===============================================================================
 
