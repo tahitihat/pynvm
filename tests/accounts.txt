@@ -144,6 +144,31 @@ When check 115 clears we can do:
     2015-08-09    50.50    50.50  For check 115
     2015-08-09     0.00     0.00  Initial account balance
 
+Next we can deposit funds into one of the accounts:
+
+    >>> run('accounts deposit savings 30.00 Monday paycheck')
+    30.00 added to savings (new balance 98.50)
+
+    >>> run('accounts list savings')
+    Date         Amount  Balance  Memo
+    ----------  -------  -------  ----
+    2015-08-09    30.00    98.50  Monday paycheck
+    2015-08-09   -50.50    68.50  For check 115
+    2015-08-09   119.00   119.00  Initial account balance
+
+Conversely, we can withdraw funds:
+
+    >>> run('accounts withdraw savings 15.00 lunch money')
+    15.00 withdrawn from savings (new balance 83.50)
+
+    >>> run('accounts list savings')
+    Date         Amount  Balance  Memo
+    ----------  -------  -------  ----
+    2015-08-09   -15.00    83.50  Lunch money
+    2015-08-09    30.00    98.50  Monday paycheck
+    2015-08-09   -50.50    68.50  For check 115
+    2015-08-09   119.00   119.00  Initial account balance
+
 (Aside: it would be nice to have the account name in the previous command
 have a default value that could be established by an 'accounts set
 default-checking checking' command so that we could just type 'accounts
