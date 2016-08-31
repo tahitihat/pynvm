@@ -118,7 +118,7 @@ If we transfer money between accounts, that will add a transaction to
 each account:
 
     >>> run('accounts transfer 50.50 savings checking For check 115')
-    Transferred 50.50 from savings (new balance 68.50) to savings (new balance 50.50)
+    Transferred 50.50 from savings (new balance 68.50) to checking (new balance 50.50)
 
     >>> run('accounts list checking')
     Date         Amount  Balance  Memo

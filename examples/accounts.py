@@ -1,11 +1,13 @@
 #demo account management program
 import argparse
 from nvm.fake_pmemobj import PersistentObjectPool, PersistentDict, PersistentList
-import decimal 
+import decimal
+import time
+
 #initial account creation module 
 
 #decimal precision
-decimal.getcontext().prec = 2
+decimal.getcontext().prec = 12
 
 #top-level parser
 parser = argparse.ArgumentParser()
@@ -15,37 +17,81 @@ parser.add_argument('-f', '--filename', default='accounts.pmem', help="filename 
 
 #create the parser for the 'accounts create' command
 parser_create = subparsers.add_parser('create', description= 'account creation')
-#(specify type of account)
 parser_create.add_argument('account', help = 'create specific type of bank account')
-#(establish initial balance in accnt)
-parser_create.add_argument('amount', help = "establish initial balance", type=decimal.Decimal, default = decimal.Decimal('0.00'), nargs = '?')
-args_create = parser.parse_args()
+parser_create.add_argument('amount', help = 'establish initial balance', type=decimal.Decimal, default = decimal.Decimal('0.00'), nargs = '?')
+#list account info., incl. past transactions
+parser_create = subparsers.add_parser('list', description = 'individual account information display')
+parser_create.add_argument('account', help = 'specify account')                         
+#transfer money between accounts
+parser_create = subparsers.add_parser('transfer', description = 'transer funds between accounts')
+parser_create.add_argument('transferAmount', help ='quantity of money to transfer', type=decimal.Decimal, default = decimal.Decimal('0.00'))
+parser_create.add_argument('pastLocation', help ='account from which funds are withdrawn')
+parser_create.add_argument('futureLocation', help = 'account to which funds are deposited') 
+parser_create.add_argument('memo', help = 'explanation of transfer', nargs = argparse.REMAINDER)
+#withdraw money from account
+parser_create = subparsers.add_parser('check', description = 'withdraw money via check')
+parser_create.add_argument('checkNumber', help = 'number of check')
+parser_create.add_argument('account', help = 'account from which to withdraw money')
+parser_create.add_argument('amount', help = 'amount withdrawn', type = decimal.Decimal, default = decimal.Decimal('0.00'))
+parser_create.add_argument('memo', help = 'check memo', nargs = argparse.REMAINDER)
+args = parser.parse_args()
 
-#temporary
-#print(args_create)
 
-with PersistentObjectPool(args_create.filename, flag='c') as pop:
+with PersistentObjectPool(args.filename, flag='c') as pop:
     if pop.root is None:
         pop.root = pop.new(PersistentDict)
     accounts = pop.root
-    if args_create.subcommand == 'create':
-        accounts[args_create.account] = args_create.amount
-        print("Created account '" + args_create.account + "'.")
-    #if subcommand == 'transfer": 
+    if args.subcommand == 'create':
+        accounts[args.account] = [['2015-08-09', decimal.Decimal(args.amount), 'Initial account balance']]
+        print("Created account '" + args.account + "'.")                       
+    elif args.subcommand == 'list':
+        L1 = ("Date         Amount  Balance  Memo\n"
+              "----------  -------  -------  ----")
+        print(L1)
+        accntBalance = decimal.Decimal(0)                           
+        for x in accounts[args.account]:
+            accntBalance = accntBalance + x[1]
+        for transaction in accounts[args.account]:
+            L2= "{:<10}{:>9}{:>9}  {}".format(x[0], transaction[1], accntBalance, x[2])
+            print(L2)
+    elif args.subcommand == 'transfer':
+        s= " "
+        memo = s.join(args.memo)                                                                        #'Initial account balance' doesn't satisfy s.join(args.memo)
+        accounts[args.pastLocation].append(['2015-08-09', -decimal.Decimal(args.transferAmount), memo])         #problem for create transaction
+        accounts[args.futureLocation].append(['2015-08-09', decimal.Decimal(args.transferAmount), memo])
+        pBalance = decimal.Decimal(0)
+        for transaction in accounts[args.pastLocation]:
+            pBalance = pBalance + transaction[1]
+        fBalance = decimal.Decimal(0)
+        for transaction in accounts[args.futureLocation]:
+            fBalance = fBalance + transaction[1]
+        print("Transferred {} from {} (new balance {}) to {} (new balance {})".format(args.transferAmount, args.pastLocation, str(pBalance), args.futureLocation, str(fBalance)))
+    elif args.subcommand == 'check':
+        c = " "
+        memo = c.join(args.memo)
+        accounts[args.account].append(['2015-08-09', -decimal.Decimal(args.amount), (memo + "(check " + checkNumber + ")")])
+        newBalance = decimal.Decimal(0)
+        for transaction in accounts[args.account]:
+            newBalance = newBalance + transaction[1]
+        print("Check {} for {} debited from {} (new balance {})".format(checkNumber, amount, account, newBalance))
     else:
         #check for accounts
         if accounts:
-            m1= ("Account           Balance\n"
-                 "-------           -------")
+            #25 character spaces
+            m1= ("Account            Balance\n"
+                 "-------            -------")
             print(m1)
-            accntTotal = 0
-            for specificAccount in accounts:
-                accntInfo = "{}             {}".format(specificAccount, accounts[specificAccount])
+            accntTotal = decimal.Decimal(0)
+            for specificAccount in sorted(accounts):
+                balance= decimal.Decimal(0.0)
+                for transaction in accounts[specificAccount]:
+                    balance = balance + transaction[1]
+                accntInfo = "{:<20}{:>6}".format(specificAccount, balance)
                 print(accntInfo)
-                accntTotal = accntTotal + accounts[specificAccount]
-            m2=("                         _______\n"
-                "    Net Worth:           {}").format(accntTotal)
-            print(m2)
+                accntTotal = accntTotal + balance
+            m2=("                   _______\n"
+                "    Net Worth:      {:>6.2f}").format(accntTotal)
+            print (m2)
         #print message if no accounts exist
         else:
             print("No accounts currently exist.  Add an account using 'account create'.")
