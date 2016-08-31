@@ -51,13 +51,14 @@ with PersistentObjectPool(args.filename, flag='c') as pop:
         accntBalance = decimal.Decimal(0)                           
         for x in accounts[args.account]:
             accntBalance = accntBalance + x[1]
-        for transaction in accounts[args.account]:
-            L2= "{:<10}{:>9}{:>9}  {}".format(x[0], transaction[1], accntBalance, x[2])
+        for transaction in reversed(accounts[args.account]):
+            L2= "{:<10}{:>9}{:>9}  {}".format(transaction[0], transaction[1], accntBalance, transaction[2])
             print(L2)
+            accntBalance = accntBalance - transaction[1]
     elif args.subcommand == 'transfer':
         s= " "
-        memo = s.join(args.memo)                                                                        #'Initial account balance' doesn't satisfy s.join(args.memo)
-        accounts[args.pastLocation].append(['2015-08-09', -decimal.Decimal(args.transferAmount), memo])         #problem for create transaction
+        memo = s.join(args.memo)                                                                        
+        accounts[args.pastLocation].append(['2015-08-09', -decimal.Decimal(args.transferAmount), memo])         
         accounts[args.futureLocation].append(['2015-08-09', decimal.Decimal(args.transferAmount), memo])
         pBalance = decimal.Decimal(0)
         for transaction in accounts[args.pastLocation]:
@@ -69,11 +70,11 @@ with PersistentObjectPool(args.filename, flag='c') as pop:
     elif args.subcommand == 'check':
         c = " "
         memo = c.join(args.memo)
-        accounts[args.account].append(['2015-08-09', -decimal.Decimal(args.amount), (memo + "(check " + checkNumber + ")")])
+        accounts[args.account].append(['2015-08-09', -decimal.Decimal(args.amount), "Check {}: {}".format(args.checkNumber, memo)])
         newBalance = decimal.Decimal(0)
         for transaction in accounts[args.account]:
             newBalance = newBalance + transaction[1]
-        print("Check {} for {} debited from {} (new balance {})".format(checkNumber, amount, account, newBalance))
+        print("Check {} for {} debited from {} (new balance {})".format(args.checkNumber, args.amount, args.account, newBalance))
     else:
         #check for accounts
         if accounts:
