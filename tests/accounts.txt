@@ -42,7 +42,7 @@ run the command:
     ...     env['PYTHONPATH'] = '.'
     ...     cmd, _, args = cmd.partition(' ')
     ...     cmd = (sys.executable + ' ' + os.path.join('examples', cmd + '.py')
-    ...             + ' -f ' + PMEM_FILE + ' ' + args)
+    ...             + ' -f ' + PMEM_FILE + ' ' + '-d 2015-08-09 ' + args)
     ...     p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE,
     ...                    universal_newlines=True, env=env)
     ...     rc = p.wait()

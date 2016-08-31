@@ -2,7 +2,7 @@
 import argparse
 from nvm.fake_pmemobj import PersistentObjectPool, PersistentDict, PersistentList
 import decimal
-import time
+import datetime
 
 #initial account creation module 
 
@@ -14,6 +14,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--foo', action = 'store_true', help = 'foo help')
 subparsers = parser.add_subparsers(help = 'sub-command help', dest = 'subcommand')
 parser.add_argument('-f', '--filename', default='accounts.pmem', help="filename to store data in")
+parser.add_argument('-d', '--date', default = datetime.date.today(), help = 'specify date for this transaction')
 
 #create the parser for the 'accounts create' command
 parser_create = subparsers.add_parser('create', description= 'account creation')
@@ -46,13 +47,16 @@ parser_create.add_argument('amount', help = 'total withdrawl', type = decimal.De
 parser_create.add_argument('memo', help = 'reason for withdrawl', nargs = argparse.REMAINDER)
 args = parser.parse_args()
 
-
+#check to see if args.date is a string -- convert to datetime object if so
+if isinstance(args.date, str) == True:
+    args.date = datetime.datetime.strptime(args.date, '%Y-%m-%d')
+    
 with PersistentObjectPool(args.filename, flag='c') as pop:
     if pop.root is None:
         pop.root = pop.new(PersistentDict)
     accounts = pop.root
     if args.subcommand == 'create':
-        accounts[args.account] = [['2015-08-09', decimal.Decimal(args.amount), 'Initial account balance']]
+        accounts[args.account] = [[args.date, decimal.Decimal(args.amount), 'Initial account balance']]
         print("Created account '" + args.account + "'.")                       
     elif args.subcommand == 'list':
         L1 = ("Date         Amount  Balance  Memo\n"
@@ -62,15 +66,15 @@ with PersistentObjectPool(args.filename, flag='c') as pop:
         for x in accounts[args.account]:
             accntBalance = accntBalance + x[1]
         for transaction in reversed(accounts[args.account]):
-            L2= "{:<10}{:>9}{:>9}  {}".format(transaction[0], transaction[1], accntBalance, transaction[2])
+            L2= "{:%Y-%m-%d}{:>9}{:>9}  {}".format(transaction[0], transaction[1], accntBalance, transaction[2])
             print(L2)
             accntBalance = accntBalance - transaction[1]
     elif args.subcommand == 'transfer':
         s= " "
         memo = s.join(args.memo)
         memo = memo[0].upper() + memo[1:]
-        accounts[args.pastLocation].append(['2015-08-09', -decimal.Decimal(args.transferAmount), memo])         
-        accounts[args.futureLocation].append(['2015-08-09', decimal.Decimal(args.transferAmount), memo])
+        accounts[args.pastLocation].append([args.date, -decimal.Decimal(args.transferAmount), memo])         
+        accounts[args.futureLocation].append([args.date, decimal.Decimal(args.transferAmount), memo])
         pBalance = decimal.Decimal(0)
         for transaction in accounts[args.pastLocation]:
             pBalance = pBalance + transaction[1]
@@ -82,7 +86,7 @@ with PersistentObjectPool(args.filename, flag='c') as pop:
         c = " "
         memo = c.join(args.memo)
         memo = memo[0].upper() + memo[1:]
-        accounts[args.account].append(['2015-08-09', -decimal.Decimal(args.amount), "Check {}: {}".format(args.checkNumber, memo)])
+        accounts[args.account].append([args.date, -decimal.Decimal(args.amount), "Check {}: {}".format(args.checkNumber, memo)])
         newBalance = decimal.Decimal(0)
         for transaction in accounts[args.account]:
             newBalance = newBalance + transaction[1]
@@ -91,7 +95,7 @@ with PersistentObjectPool(args.filename, flag='c') as pop:
         c = " "
         memo = c.join(args.memo)
         memo = memo[0].upper() + memo[1:]
-        accounts[args.account].append(['2015-08-09', decimal.Decimal(args.amount), memo])
+        accounts[args.account].append([args.date, decimal.Decimal(args.amount), memo])
         newBalance = decimal.Decimal(0)
         for transaction in accounts[args.account]:
             newBalance = newBalance + transaction[1]
@@ -100,7 +104,7 @@ with PersistentObjectPool(args.filename, flag='c') as pop:
         c = " "
         memo = c.join(args.memo)
         memo = memo[0].upper() + memo[1:]
-        accounts[args.account].append(['2015-08-09', -decimal.Decimal(args.amount), memo])
+        accounts[args.account].append([args.date, -decimal.Decimal(args.amount), memo])
         newBalance = decimal.Decimal(0)
         for transaction in accounts[args.account]:
             newBalance = newBalance + transaction[1]
