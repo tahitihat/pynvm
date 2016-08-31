@@ -1,8 +1,12 @@
 import collections
+import sys
 
 from .compat import recursive_repr, abc
 
-from _pmem import ffi    # XXX refactor to make this import unneeded
+from _pmem import ffi    # XXX refactor to make this import unneeded?
+
+# XXX: refactor to allocate this instead of hardcoding it.
+LIST_POBJPTR_ARRAY_TYPE_NUM = 30
 
 
 class PersistentList(abc.MutableSequence):
@@ -70,9 +74,12 @@ class PersistentList(abc.MutableSequence):
         items = self._items
         with mm.transaction():
             if items is None:
-                items = mm.malloc_ptrs(new_allocated)
+                items = mm.malloc(new_allocated * ffi.sizeof('PObjPtr'),
+                                  type_num=LIST_POBJPTR_ARRAY_TYPE_NUM)
             else:
-                items = mm.realloc_ptrs(self._body.ob_items, new_allocated)
+                items = mm.realloc(self._body.ob_items,
+                                   new_allocated * ffi.sizeof('PObjPtr'),
+                                   LIST_POBJPTR_ARRAY_TYPE_NUM)
             mm.snapshot_range(self._body, ffi.sizeof('PListObject'))
             self._body.ob_items = items
             self._body.allocated = new_allocated
@@ -154,20 +161,19 @@ class PersistentList(abc.MutableSequence):
                                  ', '.join("{!r}".format(x) for x in self))
 
     def __eq__(self, other):
-        try:
-            ol = len(other)
-        except AttributeError:
+        if not (isinstance(other, PersistentList) or
+                isinstance(other, list)):
             return NotImplemented
-        if len(self) != ol:
+        if len(self) != len(other):
             return False
         for i in range(len(self)):
-            try:
-                ov = other[i]
-            except (AttributeError, IndexError):
-                return NotImplemented
-            if self[i] != ov:
+            if self[i] != other[i]:
                 return False
         return True
+
+    if sys.version_info[0] < 3:
+        def __ne__(self, other):
+            return not self == other
 
     def clear(self):
         mm = self.__manager__
@@ -190,6 +196,9 @@ class PersistentList(abc.MutableSequence):
         items = self._items
         for i in range(len(self)):
             yield items[i]
+
+    def _substructures(self):
+        return ((self._body.ob_items, LIST_POBJPTR_ARRAY_TYPE_NUM),)
 
     def _deallocate(self):
         self.clear()

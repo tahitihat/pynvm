@@ -24,7 +24,7 @@ MAX_OBJ_SIZE = lib.PMEMOBJ_MAX_ALLOC_SIZE
 OID_NULL = (lib.OID_NULL.pool_uuid_lo, lib.OID_NULL.off)
 # Arbitrary numbers.
 POBJECT_TYPE_NUM = 20
-POBJPTR_ARRAY_TYPE_NUM = 21
+INTERNAL_ABORT_ERRNO = 99999
 
 
 # XXX move this to a central location and use in all libraries.
@@ -131,6 +131,23 @@ def _find_class_from_string(cls_string):
     return res
 
 
+class ObjKey(object):
+
+    def __init__(self, obj):
+        self.id = id(obj)
+
+    def __eq__(self, other):
+        if not isinstance(other, ObjKey):
+            return NotImplemented
+        return self.id == other.id
+
+    def __hash__(self):
+        return hash(self.id)
+
+    def __repr__(self):
+        return str(self.id)
+
+
 class _ObjCache(object):
 
     def __init__(self):
@@ -145,7 +162,7 @@ class _ObjCache(object):
         # only need to persist one equivalent copy.  For mutables use the
         # object id, since we must persist each instance even if they are
         # otherwise equal.
-        return obj if getattr(obj, '__hash__', None) else id(obj)
+        return obj if getattr(obj, '__hash__', None) else ObjKey(obj)
 
     def clear(self):
         # XXX I'm not sure we can get away with mapping OID_NULL
@@ -236,10 +253,6 @@ class _Transaction(object):
     def depth(self):
         return len(self._trans_stack)
 
-    def _context_abort(self, msg):
-        lib.pmemobj_tx_abort(errno.ECANCELED)
-        raise RuntimeError('Transaction aborted: ' + msg)
-
     def begin(self):
         """Start a new (sub)transaction."""
         tlog.debug('start_transaction %s', self._trans_stack)
@@ -253,7 +266,7 @@ class _Transaction(object):
         if not self._trans_stack:
             raise RuntimeError("commit called outside of transaction")
         if self._trans_stack[-1] != self._FREE:
-            self._context_abort("Non-context commit inside a context")
+            raise RuntimeError("Non-context commit inside a context")
         self._trans_stack.pop()
         lib.pmemobj_tx_commit()
         _check_errno(lib.pmemobj_tx_end())
@@ -277,11 +290,11 @@ class _Transaction(object):
         return self
 
     def __exit__(self, *args):
-        tlog.debug('__exit__: %s, %s', self._trans_stack, args)
+        tlog.debug('__exit__: %s, %r', self._trans_stack, args[1])
         if self._trans_stack.pop() == self._FREE:
             while self._trans_stack.pop() == self._FREE:
                 lib.pmemobj_tx_end()
-            self._context_abort("Non-context transaction open at context end.")
+            raise RuntimeError("Non-context transaction open at context end.")
         stage = lib.pmemobj_tx_stage()
         if stage == lib.TX_STAGE_WORK:
             if args[0] is None:
@@ -293,11 +306,11 @@ class _Transaction(object):
                 # We have a Python exception that didn't result from an error
                 # in the pmemobj library, so manually roll back the transaction
                 # since the python block won't have completed.
-                lib.pmemobj_tx_abort(errno.ECANCELED)
+                lib.pmemobj_tx_abort(INTERNAL_ABORT_ERRNO)
         err = lib.pmemobj_tx_end()
         if err:
             self._obj_cache.clear_transaction_cache()
-            if err != errno.ECANCELED or args[0] is None:
+            if err != INTERNAL_ABORT_ERRNO:
                 _raise_per_errno()
         elif not self._trans_stack:
             self._obj_cache.commit_transaction_cache()
@@ -347,15 +360,6 @@ class MemoryManager(object):
         log.debug('malloced oid: %s', oid)
         return oid
 
-    def malloc_ptrs(self, count):
-        """Return pointer to enough persistent memory for count pointers.
-
-        The pmem type number is set to POBJPTR_ARRAY_TYPE_NUM.
-        """
-        log.debug('malloc_ptrs: %r', count)
-        return self.malloc(count * ffi.sizeof('PObjPtr'),
-                            type_num=POBJPTR_ARRAY_TYPE_NUM)
-
     def realloc(self, oid, size, type_num=None):
         """Copy oid contents into size bytes of new persistent memory.
 
@@ -373,13 +377,6 @@ class MemoryManager(object):
             _raise_per_errno()
         log.debug('oid: %s', oid)
         return oid
-
-    def realloc_ptrs(self, oid, count):
-        oid = self.otuple(oid)
-        log.debug('realloc_ptrs: %r %r', oid, count)
-        """As realloc, but the new memory is enough for count pointers."""
-        return self.realloc(oid, count * ffi.sizeof('PObjPtr'),
-                             POBJPTR_ARRAY_TYPE_NUM)
 
     def free(self, oid):
         """Free the memory pointed to by oid."""
@@ -772,8 +769,13 @@ class PersistentObjectPool(object):
         referenced somewhere in the tree is freed.  This collects cyclic
         garbage, and produces warnings for unreferenced objects with incorrect
         refcounts.  Most garbage is automatically collected when the object is
-        no longer referenced.  If debug is true, the debug logging output
-        will include reprs of the objects encountered.
+        no longer referenced.
+
+        If debug is true, the debug logging output will include reprs of the
+        objects encountered, all orphans will be logged as warnings, and
+        additional checks will be done for orphaned or invalid data structures
+        (those reported by a Persistent object's _substructures method).
+
         """
         # XXX CPython uses a three generation GC in order to obtain more or
         # less linear performance against the total number of objects.
@@ -786,6 +788,7 @@ class PersistentObjectPool(object):
         other = set()
         orphans = set()
         types = {}
+        substructures = collections.defaultdict(dict)
         type_counts = collections.defaultdict(int)
         gc_counts = collections.defaultdict(int)
 
@@ -827,7 +830,9 @@ class PersistentObjectPool(object):
                                       oid, obj.ob_refcnt, self.mm.resurrect(oid))
                         other.add(oid)
                 else:
-                    log.debug("gc: non PObject: %s", oid)
+                    if debug:
+                        log.debug("gc: non PObject (type %s): %s", type_num, oid)
+                        substructures[type_num][oid] = []
                 oid = self.mm.otuple(lib.pmemobj_next(oid))
             gc_counts['containers-total'] = len(containers)
             gc_counts['other-total'] = len(other)
@@ -841,6 +846,33 @@ class PersistentObjectPool(object):
                     log.warning("deallocating orphan (refcount 0): %s %r",
                                 oid, self.mm.resurrect(oid))
                 self.mm._deallocate(oid)
+
+            # In debug mode, validate the container substructures.
+            if debug:
+                log.debug("Checking substructure integrity")
+                for container_oid in containers:
+                    container = self.mm.resurrect(container_oid)
+                    for oid, type_num in container._substructures():
+                        oid = self.mm.otuple(oid)
+                        if oid == self.mm.OID_NULL:
+                            continue
+                        if oid not in substructures[type_num]:
+                            log.error("%s points to subsctructure type %s"
+                                      " at %s, but we didn't find it in"
+                                      " the pmemobj object list.",
+                                      container_oid, type_num, oid)
+                        else:
+                            substructures[type_num][oid].append(container_oid)
+                for type_num, structs in substructures.items():
+                    for struct_oid, parent_oids in structs.items():
+                        if not parent_oids:
+                            log.error("substructure type %s at %s is not"
+                                      " referenced by any existing object.",
+                                      type_num, struct_oid)
+                        elif len(parent_oids) > 1:
+                            log.error("substructure type %s at %s is"
+                                      "referenced by more than once object: %s",
+                                      type_num, struct_oid, parent_oids)
 
             # Trace the object tree, removing objects that are referenced.
             containers.remove(self.mm._type_table._oid)
