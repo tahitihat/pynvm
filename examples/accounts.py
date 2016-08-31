@@ -6,9 +6,6 @@ import datetime
 
 #initial account creation module 
 
-#decimal precision
-decimal.getcontext().prec = 12
-
 #top-level parser
 parser = argparse.ArgumentParser()
 parser.add_argument('--foo', action = 'store_true', help = 'foo help')
